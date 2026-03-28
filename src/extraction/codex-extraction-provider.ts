@@ -7,6 +7,12 @@ import type {
   ExtractionProvider,
   TurnArtifact,
 } from "./extraction-provider";
+import {
+  createRunId,
+  debugLoggingEnabled,
+  dlog,
+  type DebugLogLevel,
+} from "../shared/debug-log";
 
 type CodexProviderConfig = {
   apiKey?: string;
@@ -90,14 +96,18 @@ const buildExtractionPrompt = (turn: TurnArtifact): string => JSON.stringify({
 const parseDraftCandidates = (
   text: string,
   turn: TurnArtifact,
-): DraftCandidate[] => {
+): { candidates: DraftCandidate[]; parseFailed: boolean } => {
   try {
     const parsed = JSON.parse(text) as Array<Partial<DraftCandidate>>;
     if (!Array.isArray(parsed)) {
-      return [];
+      return {
+        candidates: [],
+        parseFailed: true,
+      };
     }
 
-    return parsed.flatMap((candidate, index) => {
+    return {
+      candidates: parsed.flatMap((candidate, index) => {
       if (
         typeof candidate.kind !== "string" ||
         typeof candidate.title !== "string" ||
@@ -125,9 +135,14 @@ const parseDraftCandidates = (
           ? candidate.tags.filter((tag): tag is string => typeof tag === "string")
           : [],
       }];
-    });
+      }),
+      parseFailed: false,
+    };
   } catch {
-    return [];
+    return {
+      candidates: [],
+      parseFailed: true,
+    };
   }
 };
 
@@ -214,12 +229,60 @@ export class CodexExtractionProvider implements ExtractionProvider {
   }
 
   async extractCandidates(turn: TurnArtifact): Promise<DraftCandidate[]> {
+    const runId = debugLoggingEnabled ? createRunId() : undefined;
+    const log = (
+      level: DebugLogLevel,
+      event: string,
+      data?: Record<string, unknown>,
+      extras?: {
+        ok?: boolean;
+        summary?: string;
+      },
+    ): void => {
+      if (!runId) {
+        return;
+      }
+
+      dlog({
+        level,
+        component: "codex-extraction-provider",
+        event,
+        hook: "Core",
+        runId,
+        sessionId: turn.sessionId,
+        projectId: turn.projectId,
+        ok: extras?.ok,
+        summary: extras?.summary,
+        data,
+      });
+    };
     const config = await readCodexProviderConfig(this.readFileImpl);
+    log("trace", "extraction.config_loaded", {
+      hasApiKey: config.apiKey !== undefined,
+      hasBaseUrl: config.baseUrl !== undefined,
+      model: config.model,
+      turnIndex: turn.turnIndex,
+    }, {
+      ok: true,
+    });
     if (!config.apiKey || !config.baseUrl) {
+      log("debug", "extraction.llm_skipped", {
+        reason: !config.apiKey ? "missing_api_key" : "missing_base_url",
+        turnIndex: turn.turnIndex,
+      }, {
+        ok: true,
+        summary: "Extraction skipped because Codex LLM config is incomplete.",
+      });
       return [];
     }
 
     try {
+      log("debug", "extraction.llm_request_started", {
+        model: config.model,
+        turnIndex: turn.turnIndex,
+      }, {
+        ok: true,
+      });
       const response = await this.fetchImpl(`${config.baseUrl}/responses`, {
         method: "POST",
         headers: {
@@ -232,6 +295,13 @@ export class CodexExtractionProvider implements ExtractionProvider {
         }),
       });
       if (!response.ok) {
+        log("warn", "extraction.llm_response_received", {
+          responseStatus: response.status,
+          turnIndex: turn.turnIndex,
+        }, {
+          ok: false,
+          summary: "Extraction request returned a non-success HTTP status.",
+        });
         await warnOnAuthFailure(response.status, {
           readFile: this.readFileImpl,
           writeFile: this.writeFileImpl,
@@ -239,12 +309,47 @@ export class CodexExtractionProvider implements ExtractionProvider {
           now: this.now,
           warn: this.warn,
         });
+        if (shouldWarnForStatus(response.status)) {
+          log("warn", "extraction.llm_auth_warning", {
+            responseStatus: response.status,
+          }, {
+            ok: false,
+            summary: "Extraction hit an auth-related Responses API status.",
+          });
+        }
         return [];
       }
 
       const payload = await response.json() as { output_text?: string };
-      return parseDraftCandidates(payload.output_text ?? "[]", turn);
-    } catch {
+      const parsed = parseDraftCandidates(payload.output_text ?? "[]", turn);
+      log("debug", "extraction.llm_response_received", {
+        responseStatus: response.status,
+        outputTextLength: (payload.output_text ?? "").length,
+      }, {
+        ok: true,
+      });
+      if (parsed.parseFailed) {
+        log("warn", "extraction.llm_parse_failed", {
+          turnIndex: turn.turnIndex,
+        }, {
+          ok: false,
+          summary: "Extraction response could not be parsed into draft candidates.",
+        });
+      }
+      log("debug", "extraction.candidates_parsed", {
+        candidateCount: parsed.candidates.length,
+        candidateKinds: parsed.candidates.map((candidate) => candidate.kind),
+      }, {
+        ok: true,
+      });
+      return parsed.candidates;
+    } catch (error) {
+      log("warn", "extraction.llm_response_received", {
+        error: error instanceof Error ? error.message : String(error),
+      }, {
+        ok: false,
+        summary: "Extraction request failed before a usable response was received.",
+      });
       return [];
     }
   }

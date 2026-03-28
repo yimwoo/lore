@@ -1,10 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   formatWhisper,
   selectWhisperBullets,
   updateWhisperHistory,
 } from "../src/plugin/pre-prompt-whisper";
+import { deriveSessionKey } from "../src/plugin/whisper-state";
 import type {
   HintBullet,
   SharedKnowledgeEntry,
@@ -14,6 +19,17 @@ import { contentHash } from "../src/shared/validators";
 import { resolveConfig } from "../src/config";
 
 const config = resolveConfig().whisper;
+const tempDirs: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    tempDirs.splice(0).map(async (path) => {
+      await rm(path, { recursive: true, force: true });
+    }),
+  );
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+});
 
 const makeState = (
   overrides?: Partial<WhisperSessionState>,
@@ -320,5 +336,102 @@ describe("updateWhisperHistory", () => {
 
     const updated = updateWhisperHistory(state, bullets);
     expect(updated.whisperHistory).toHaveLength(0);
+  });
+});
+
+describe("runPrePromptWhisper", () => {
+  it("emits structured trace events to stderr when debug tracing is enabled", async () => {
+    vi.resetModules();
+    const homeDir = await mkdtemp(join(tmpdir(), "lore-whisper-trace-"));
+    tempDirs.push(homeDir);
+    vi.stubEnv("HOME", homeDir);
+    vi.stubEnv("LORE_DEBUG", "trace");
+
+    const sharedPath = join(homeDir, ".lore", "shared.json");
+    const whisperDir = join(homeDir, ".lore", "whisper-sessions");
+    await mkdir(join(homeDir, ".lore"), { recursive: true });
+    await mkdir(whisperDir, { recursive: true });
+    await writeFile(sharedPath, `${JSON.stringify([makeEntry()], null, 2)}\n`, "utf8");
+
+    const sessionId = "session-1";
+    const cwd = "/tmp/workspaces/proj-1";
+    const sessionKey = deriveSessionKey(sessionId, cwd);
+    await writeFile(
+      join(whisperDir, `whisper-${sessionKey}.json`),
+      `${JSON.stringify(makeState({ sessionKey }), null, 2)}\n`,
+      "utf8",
+    );
+
+    const stdoutWrites: string[] = [];
+    const stderrWrites: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(((chunk: string | Uint8Array): boolean => {
+        stdoutWrites.push(String(chunk));
+        return true;
+      }) as typeof process.stdout.write);
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(((chunk: string | Uint8Array): boolean => {
+        stderrWrites.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write);
+
+    const { runPrePromptWhisper: runWhisper } = await import("../src/plugin/pre-prompt-whisper");
+    await runWhisper(
+      JSON.stringify({
+        session_id: sessionId,
+        cwd,
+        prompt: "Fix the database column naming.",
+      }),
+    );
+
+    stdoutSpy.mockRestore();
+    stderrSpy.mockRestore();
+
+    expect(stdoutWrites.join("")).toContain("[Lore]");
+    expect(stderrWrites.length).toBeGreaterThan(0);
+    const lines = stderrWrites
+      .join("")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { event: string; component: string; hook: string; sessionId?: string });
+    expect(lines.some((line) => line.event === "whisper.invoked")).toBe(true);
+    expect(lines.some((line) => line.event === "whisper.scored")).toBe(true);
+    expect(lines.some((line) => line.event === "whisper.completed")).toBe(true);
+    expect(lines.every((line) => line.component === "pre-prompt-whisper")).toBe(true);
+    expect(lines.every((line) => line.hook === "UserPromptSubmit")).toBe(true);
+    expect(lines.some((line) => line.sessionId === sessionId)).toBe(true);
+  });
+
+  it("emits a suppression trace when no session id is present", async () => {
+    vi.resetModules();
+    const homeDir = await mkdtemp(join(tmpdir(), "lore-whisper-trace-"));
+    tempDirs.push(homeDir);
+    vi.stubEnv("HOME", homeDir);
+    vi.stubEnv("LORE_DEBUG", "trace");
+
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(((chunk: string | Uint8Array): boolean => {
+        stderrWrites.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write);
+
+    const { runPrePromptWhisper: runWhisper } = await import("../src/plugin/pre-prompt-whisper");
+    await runWhisper(JSON.stringify({ cwd: "/tmp/workspaces/proj-1", prompt: "help" }));
+
+    stderrSpy.mockRestore();
+
+    const lines = stderrWrites
+      .join("")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { event: string; data?: { reason?: string } });
+    expect(lines.some((line) => line.event === "whisper.suppressed")).toBe(true);
+    expect(lines.some((line) => line.data?.reason === "no_session_id")).toBe(true);
   });
 });

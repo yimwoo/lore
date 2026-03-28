@@ -331,4 +331,83 @@ describe("session-start integration", () => {
 
     expect(warnings).toHaveLength(0);
   });
+
+  it("emits structured trace events to stderr when debug tracing is enabled", async () => {
+    vi.resetModules();
+    vi.stubEnv("LORE_DEBUG", "trace");
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(((chunk: string | Uint8Array): boolean => {
+        stderrWrites.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write);
+
+    const { runSessionStart } = await import("../src/plugin/session-start");
+    const { resolveConfig } = await import("../src/config");
+    await writeFile(sharedStorePath, `${JSON.stringify([makeSharedEntry()], null, 2)}\n`, "utf8");
+
+    const result = await runSessionStart(
+      JSON.stringify({ session_id: "session-1", cwd: "/tmp/workspaces/my-project" }),
+      {
+        config: resolveConfig({
+          sharedStoragePath: sharedStorePath,
+          projectMemoryDir,
+          consolidationTimeoutMs: 5,
+        }),
+        consolidate: async () => undefined,
+      },
+    );
+
+    stderrSpy.mockRestore();
+
+    expect(result.additionalContext).toContain("Use snake_case");
+    expect(stderrWrites.length).toBeGreaterThan(0);
+    const lines = stderrWrites
+      .join("")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { event: string; component: string; hook: string; sessionId?: string });
+    expect(lines.some((line) => line.event === "session_start.invoked")).toBe(true);
+    expect(lines.some((line) => line.event === "session_start.context_built")).toBe(true);
+    expect(lines.some((line) => line.event === "session_start.completed")).toBe(true);
+    expect(lines.every((line) => line.component === "session-start")).toBe(true);
+    expect(lines.every((line) => line.hook === "SessionStart")).toBe(true);
+    expect(lines.some((line) => line.sessionId === "session-1")).toBe(true);
+  });
+
+  it("does not emit trace events when debug tracing is disabled", async () => {
+    vi.resetModules();
+    vi.unstubAllEnvs();
+    vi.stubEnv("HOME", codexHomeDir);
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(((chunk: string | Uint8Array): boolean => {
+        stderrWrites.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write);
+
+    const { runSessionStart } = await import("../src/plugin/session-start");
+    const { resolveConfig } = await import("../src/config");
+    await writeFile(sharedStorePath, `${JSON.stringify([makeSharedEntry()], null, 2)}\n`, "utf8");
+
+    const result = await runSessionStart(
+      JSON.stringify({ session_id: "session-1", cwd: "/tmp/workspaces/my-project" }),
+      {
+        config: resolveConfig({
+          sharedStoragePath: sharedStorePath,
+          projectMemoryDir,
+          consolidationTimeoutMs: 5,
+        }),
+        consolidate: async () => undefined,
+      },
+    );
+
+    stderrSpy.mockRestore();
+
+    expect(result.additionalContext).toContain("Use snake_case");
+    expect(stderrWrites).toEqual([]);
+  });
 });

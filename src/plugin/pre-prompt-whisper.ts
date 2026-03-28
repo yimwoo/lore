@@ -21,6 +21,12 @@ import type {
   WhisperSessionState,
 } from "../shared/types";
 import { whisperLabelMap } from "../shared/types";
+import {
+  createRunId,
+  debugLoggingEnabled,
+  dlog,
+  type DebugLogLevel,
+} from "../shared/debug-log";
 
 type WhisperInput = {
   promptText: string;
@@ -49,6 +55,46 @@ const hasStrongSessionContext = (
   recentFileTags: string[],
   recentToolNames: string[],
 ): boolean => recentFileTags.length > 0 || recentToolNames.length > 0;
+
+const summarizeSuppressionReason = (
+  promptText: string,
+  state: WhisperSessionState,
+  sharedEntries: SharedKnowledgeEntry[],
+  hintBullets: HintBullet[],
+  config: WhisperConfig,
+): string => {
+  if (sharedEntries.length === 0 && hintBullets.length === 0) {
+    return "no_candidates";
+  }
+
+  const injectedSet = new Set(state.injectedContentHashes);
+  const approvedSharedEntries = sharedEntries.filter(
+    (entry) => entry.approvalStatus === "approved",
+  );
+  if (
+    approvedSharedEntries.length > 0 &&
+    approvedSharedEntries.every((entry) => injectedSet.has(entry.contentHash))
+  ) {
+    return "already_injected";
+  }
+
+  const promptTokens = tokenize(promptText, config.keywordMinTokenLength);
+  const promptTags = inferPromptTags(
+    promptText,
+    state.recentFiles,
+    state.recentToolNames,
+  );
+  const recentFileTags = inferPromptTags("", state.recentFiles, state.recentToolNames);
+  if (
+    hintBullets.length > 0 &&
+    isWeakPrompt(promptTokens, promptTags) &&
+    !hasStrongSessionContext(recentFileTags, state.recentToolNames)
+  ) {
+    return "weak_prompt_and_no_strong_context";
+  }
+
+  return "below_threshold";
+};
 
 export const selectWhisperBullets = (
   input: WhisperInput,
@@ -220,8 +266,46 @@ const readStdin = (): Promise<string> =>
 export const runPrePromptWhisper = async (
   stdinData?: string,
 ): Promise<void> => {
+  const startedAt = Date.now();
+  const runId = debugLoggingEnabled ? createRunId() : undefined;
   const config = resolveConfig();
+  const log = (
+    level: DebugLogLevel,
+    event: string,
+    data?: Record<string, unknown>,
+    extras?: {
+      ok?: boolean;
+      summary?: string;
+      durationMs?: number;
+      sessionId?: string;
+      sessionKey?: string;
+      projectId?: string;
+    },
+  ): void => {
+    if (!runId) {
+      return;
+    }
+
+    dlog({
+      level,
+      component: "pre-prompt-whisper",
+      event,
+      hook: "UserPromptSubmit",
+      runId,
+      sessionId: extras?.sessionId,
+      sessionKey: extras?.sessionKey,
+      projectId: extras?.projectId,
+      ok: extras?.ok,
+      summary: extras?.summary,
+      durationMs: extras?.durationMs,
+      data,
+    });
+  };
   const input = stdinData ?? (await readStdin());
+  log("debug", "whisper.invoked", {
+    hasStdinData: stdinData !== undefined,
+    inputLength: input.length,
+  });
 
   let parsed: Record<string, unknown> = {};
   try {
@@ -229,22 +313,70 @@ export const runPrePromptWhisper = async (
       parsed = JSON.parse(input) as Record<string, unknown>;
     }
   } catch {
+    log("warn", "whisper.suppressed", {
+      reason: "unparseable_input",
+      inputLength: input.length,
+    }, {
+      ok: false,
+      durationMs: Date.now() - startedAt,
+      summary: "Whisper input was malformed and was ignored.",
+    });
     return; // unparseable → silent exit
   }
 
   const sessionId = typeof parsed.session_id === "string" ? parsed.session_id : undefined;
   const cwd = typeof parsed.cwd === "string" ? parsed.cwd : process.cwd();
   const promptText = typeof parsed.prompt === "string" ? parsed.prompt : "";
+  const projectId = cwd.split("/").filter(Boolean).pop() ?? "unknown";
+  log("debug", "whisper.input_parsed", {
+    cwd,
+    promptLength: promptText.length,
+    hasSessionId: sessionId !== undefined,
+  }, {
+    ok: true,
+    sessionId,
+    projectId,
+  });
 
-  if (!sessionId) return; // whispers disabled
+  if (!sessionId) {
+    log("debug", "whisper.suppressed", {
+      reason: "no_session_id",
+    }, {
+      ok: true,
+      durationMs: Date.now() - startedAt,
+      summary: "Whisper skipped because session_id was missing.",
+      projectId,
+    });
+    return; // whispers disabled
+  }
 
   const sessionKey = deriveSessionKey(sessionId, cwd);
   const state = await readWhisperState(sessionKey, config.whisperStateDir);
+  log("trace", "whisper.state_loaded", {
+    turnIndex: state.turnIndex,
+    recentFileCount: state.recentFiles.length,
+    recentToolCount: state.recentToolNames.length,
+    whisperHistoryCount: state.whisperHistory.length,
+    injectedContentHashCount: state.injectedContentHashes.length,
+  }, {
+    ok: true,
+    sessionId,
+    sessionKey,
+    projectId,
+  });
 
   const sharedStore = new FileSharedStore({
     storagePath: config.sharedStoragePath,
   });
   const sharedEntries = await sharedStore.list({ approvalStatus: "approved" });
+  log("debug", "whisper.shared_loaded", {
+    sharedEntryCount: sharedEntries.length,
+  }, {
+    ok: true,
+    sessionId,
+    sessionKey,
+    projectId,
+  });
 
   // Build hint bullets from project memories
   let hintBullets: HintBullet[] = [];
@@ -265,6 +397,14 @@ export const runPrePromptWhisper = async (
   } catch {
     // No project memories available
   }
+  log("trace", "whisper.hint_candidates_built", {
+    hintCount: hintBullets.length,
+  }, {
+    ok: true,
+    sessionId,
+    sessionKey,
+    projectId,
+  });
 
   const bullets = selectWhisperBullets(
     { promptText, sessionKey, cwd },
@@ -273,17 +413,96 @@ export const runPrePromptWhisper = async (
     hintBullets,
     config.whisper,
   );
+  log("debug", "whisper.scored", {
+    promptLength: promptText.length,
+    selectedCount: bullets.length,
+    sharedEntryCount: sharedEntries.length,
+    hintCount: hintBullets.length,
+    topScores: bullets.slice(0, 3).map((bullet) => ({
+      contentHash: bullet.contentHash,
+      kind: bullet.kind,
+      score: bullet.score,
+      source: bullet.source,
+      topReason: bullet.topReason,
+    })),
+  }, {
+    ok: true,
+    sessionId,
+    sessionKey,
+    projectId,
+  });
 
   const output = formatWhisper(bullets);
   if (output) {
     process.stdout.write(output + "\n");
+    log("info", "whisper.output_written", {
+      bulletCount: bullets.length,
+      outputLength: output.length,
+    }, {
+      ok: true,
+      sessionId,
+      sessionKey,
+      projectId,
+    });
+    log("debug", "whisper.selected", {
+      bullets: bullets.map((bullet) => ({
+        contentHash: bullet.contentHash,
+        kind: bullet.kind,
+        score: bullet.score,
+        source: bullet.source,
+        topReason: bullet.topReason,
+      })),
+    }, {
+      ok: true,
+      sessionId,
+      sessionKey,
+      projectId,
+    });
+  } else {
+    log("debug", "whisper.suppressed", {
+      reason: summarizeSuppressionReason(
+        promptText,
+        state,
+        sharedEntries,
+        hintBullets,
+        config.whisper,
+      ),
+      sharedEntryCount: sharedEntries.length,
+      hintCount: hintBullets.length,
+    }, {
+      ok: true,
+      sessionId,
+      sessionKey,
+      projectId,
+      durationMs: Date.now() - startedAt,
+      summary: "No whisper output was emitted for this prompt.",
+    });
   }
 
   // Record whisper decisions
   if (bullets.length > 0) {
     const updatedState = updateWhisperHistory(state, bullets);
     await writeWhisperState(updatedState, config.whisperStateDir, config.whisper);
+    log("trace", "whisper.state_updated", {
+      whisperHistoryCount: updatedState.whisperHistory.length,
+    }, {
+      ok: true,
+      sessionId,
+      sessionKey,
+      projectId,
+    });
   }
+
+  log("info", "whisper.completed", {
+    bulletCount: bullets.length,
+  }, {
+    ok: true,
+    sessionId,
+    sessionKey,
+    projectId,
+    durationMs: Date.now() - startedAt,
+    summary: "Whisper hook completed.",
+  });
 };
 
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1])) {

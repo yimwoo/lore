@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ExtractionProvider } from "../src/extraction/extraction-provider";
 import { applyStopUpdate, buildTurnArtifact, runStopObserver } from "../src/plugin/stop-observer";
@@ -6,6 +6,11 @@ import type { WhisperSessionState } from "../src/shared/types";
 import { resolveConfig } from "../src/config";
 
 const config = resolveConfig().whisper;
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+});
 
 const makeState = (
   overrides?: Partial<WhisperSessionState>,
@@ -248,5 +253,102 @@ describe("runStopObserver extraction path", () => {
         },
       ),
     ).resolves.toBeUndefined();
+  });
+
+  it("emits a skip trace when no provider is configured", async () => {
+    vi.resetModules();
+    vi.stubEnv("LORE_DEBUG", "trace");
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(((chunk: string | Uint8Array): boolean => {
+        stderrWrites.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write);
+
+    const { runStopObserver: runStop } = await import("../src/plugin/stop-observer");
+    await runStop(
+      JSON.stringify({
+        session_id: "session-1",
+        cwd: "/tmp/workspaces/billing-service",
+      }),
+      {
+        config: resolveConfig(),
+        readState: async () => makeState(),
+        writeState: async () => undefined,
+      },
+    );
+
+    stderrSpy.mockRestore();
+
+    const lines = stderrWrites
+      .join("")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { event: string; data?: { reason?: string } });
+    expect(lines.some((line) => line.event === "stop.extraction.skipped")).toBe(true);
+    expect(lines.some((line) => line.data?.reason === "no_provider_configured")).toBe(true);
+  });
+
+  it("emits extraction trace events when a provider is configured", async () => {
+    vi.resetModules();
+    vi.stubEnv("LORE_DEBUG", "trace");
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(((chunk: string | Uint8Array): boolean => {
+        stderrWrites.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write);
+
+    const provider: ExtractionProvider = {
+      extractCandidates: async () => [
+        {
+          id: "draft-1",
+          kind: "domain_rule",
+          title: "Use snake_case",
+          content: "All database columns use snake_case naming.",
+          confidence: 0.83,
+          evidenceNote: "Observed after an explicit correction.",
+          sessionId: "session-1",
+          projectId: "billing-service",
+          turnIndex: 4,
+          timestamp: "2026-03-28T20:00:00.000Z",
+          tags: ["database"],
+        },
+      ],
+    };
+
+    const { runStopObserver: runStop } = await import("../src/plugin/stop-observer");
+    await runStop(
+      JSON.stringify({
+        session_id: "session-1",
+        cwd: "/tmp/workspaces/billing-service",
+      }),
+      {
+        config: resolveConfig(),
+        provider,
+        draftWriter: {
+          append: async () => undefined,
+        },
+        readState: async () => makeState(),
+        writeState: async () => undefined,
+        now: () => "2026-03-28T20:00:00.000Z",
+      },
+    );
+
+    stderrSpy.mockRestore();
+
+    const lines = stderrWrites
+      .join("")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { event: string });
+    expect(lines.some((line) => line.event === "stop.extraction.begin")).toBe(true);
+    expect(lines.some((line) => line.event === "stop.extraction.done")).toBe(true);
+    expect(lines.some((line) => line.event === "stop.drafts_written")).toBe(true);
+    expect(lines.some((line) => line.event === "stop.completed")).toBe(true);
   });
 });

@@ -7,6 +7,12 @@ import type { ExtractionProvider, TurnArtifact } from "../extraction/extraction-
 import { DraftStoreWriter } from "../promotion/draft-store";
 import { deriveSessionKey, readWhisperState, writeWhisperState } from "./whisper-state";
 import type { WhisperSessionState } from "../shared/types";
+import {
+  createRunId,
+  debugLoggingEnabled,
+  dlog,
+  type DebugLogLevel,
+} from "../shared/debug-log";
 
 type StopInput = {
   session_id?: string;
@@ -144,11 +150,49 @@ export const runStopObserver = async (
   stdinData?: string,
   dependencies?: StopObserverDependencies,
 ): Promise<void> => {
+  const startedAt = Date.now();
+  const runId = debugLoggingEnabled ? createRunId() : undefined;
   const config = dependencies?.config ?? resolveConfig();
   const now = dependencies?.now ?? (() => new Date().toISOString());
   const readState = dependencies?.readState ?? readWhisperState;
   const writeState = dependencies?.writeState ?? writeWhisperState;
+  const log = (
+    level: DebugLogLevel,
+    event: string,
+    data?: Record<string, unknown>,
+    extras?: {
+      ok?: boolean;
+      summary?: string;
+      durationMs?: number;
+      sessionId?: string;
+      sessionKey?: string;
+      projectId?: string;
+    },
+  ): void => {
+    if (!runId) {
+      return;
+    }
+
+    dlog({
+      level,
+      component: "stop-observer",
+      event,
+      hook: "Stop",
+      runId,
+      sessionId: extras?.sessionId,
+      sessionKey: extras?.sessionKey,
+      projectId: extras?.projectId,
+      ok: extras?.ok,
+      summary: extras?.summary,
+      durationMs: extras?.durationMs,
+      data,
+    });
+  };
   const input = stdinData ?? (await readStdin());
+  log("debug", "stop.invoked", {
+    hasStdinData: stdinData !== undefined,
+    inputLength: input.length,
+  });
 
   let parsed: StopInput = {};
   try {
@@ -156,20 +200,87 @@ export const runStopObserver = async (
       parsed = JSON.parse(input) as StopInput;
     }
   } catch {
+    log("warn", "stop.input_parsed", {
+      parsed: false,
+      inputLength: input.length,
+    }, {
+      ok: false,
+      durationMs: Date.now() - startedAt,
+      summary: "Stop hook input was malformed and ignored.",
+    });
     return; // unparseable → no-op
   }
 
   const sessionId = parsed.session_id;
-  if (!sessionId) return; // whispers disabled
-
   const cwd = parsed.cwd ?? process.cwd();
+  const projectId = deriveProjectId(cwd);
+  log("debug", "stop.input_parsed", {
+    parsed: true,
+    cwd,
+    hasSessionId: sessionId !== undefined,
+    hasPrompt: typeof parsed.prompt === "string" && parsed.prompt.length > 0,
+    hasResponse:
+      typeof parsed.assistant_response === "string" ||
+      typeof parsed.response_summary === "string" ||
+      typeof parsed.response === "string",
+    toolCallCount: parsed.tool_calls?.length ?? 0,
+    filesModifiedCount: parsed.files_modified?.length ?? 0,
+    filesReadCount: parsed.files_read?.length ?? 0,
+  }, {
+    ok: true,
+    sessionId,
+    projectId,
+  });
+
+  if (!sessionId) {
+    log("debug", "stop.extraction.skipped", {
+      reason: "no_session_id",
+    }, {
+      ok: true,
+      durationMs: Date.now() - startedAt,
+      summary: "Stop hook skipped because session_id was missing.",
+      projectId,
+    });
+    return; // whispers disabled
+  }
+
   const sessionKey = deriveSessionKey(sessionId, cwd);
   const state = await readState(sessionKey, config.whisperStateDir);
+  log("trace", "stop.state_loaded", {
+    turnIndex: state.turnIndex,
+    recentFileCount: state.recentFiles.length,
+    recentToolCount: state.recentToolNames.length,
+  }, {
+    ok: true,
+    sessionId,
+    sessionKey,
+    projectId,
+  });
 
   const updated = applyStopUpdate(state, parsed);
   await writeState(updated, config.whisperStateDir, config.whisper);
+  log("debug", "stop.state_updated", {
+    turnIndex: updated.turnIndex,
+    recentFileCount: updated.recentFiles.length,
+    recentToolCount: updated.recentToolNames.length,
+  }, {
+    ok: true,
+    sessionId,
+    sessionKey,
+    projectId,
+  });
 
   if (!dependencies?.provider) {
+    log("debug", "stop.extraction.skipped", {
+      reason: "no_provider_configured",
+    }, {
+      ok: true,
+      durationMs: Date.now() - startedAt,
+      sessionId,
+      sessionKey,
+      projectId,
+      summary: "Stop hook updated state but skipped extraction because no provider was configured.",
+    });
     return;
   }
 
@@ -182,13 +293,70 @@ export const runStopObserver = async (
     });
 
   try {
+    log("debug", "stop.extraction.begin", {
+      turnIndex: artifact.turnIndex,
+      fileCount: artifact.files.length,
+      toolSummaryCount: artifact.toolSummaries.length,
+    }, {
+      ok: true,
+      sessionId,
+      sessionKey,
+      projectId,
+    });
     const drafts = await dependencies.provider.extractCandidates(artifact);
+    log("debug", "stop.extraction.done", {
+      draftCount: drafts.length,
+      draftKinds: drafts.map((draft) => draft.kind),
+    }, {
+      ok: true,
+      sessionId,
+      sessionKey,
+      projectId,
+    });
     for (const draft of drafts) {
-      await draftWriter.append(draft);
+      try {
+        await draftWriter.append(draft);
+      } catch (error) {
+        log("warn", "stop.draft_write_error", {
+          draftId: draft.id,
+          error: error instanceof Error ? error.message : String(error),
+        }, {
+          ok: false,
+          sessionId,
+          sessionKey,
+          projectId,
+          summary: "Stop hook extracted a draft but failed to persist it.",
+        });
+        throw error;
+      }
     }
+    log("debug", "stop.drafts_written", {
+      draftCount: drafts.length,
+    }, {
+      ok: true,
+      sessionId,
+      sessionKey,
+      projectId,
+    });
   } catch {
     // Extraction is advisory only. The Stop hook should never surface failures.
+    log("warn", "stop.extraction.error", undefined, {
+      ok: false,
+      sessionId,
+      sessionKey,
+      projectId,
+      summary: "Stop hook extraction failed but was treated as advisory.",
+    });
   }
+
+  log("info", "stop.completed", undefined, {
+    ok: true,
+    durationMs: Date.now() - startedAt,
+    sessionId,
+    sessionKey,
+    projectId,
+    summary: "Stop hook completed.",
+  });
 };
 
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1])) {

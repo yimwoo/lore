@@ -16,6 +16,12 @@ import type { LoreCapabilities } from "../shared/types";
 import { deriveSessionKey, initWhisperState } from "./whisper-state";
 import type { MemoryEntry } from "../shared/types";
 import { CodexConsolidationProvider } from "../extraction/codex-consolidation-provider";
+import {
+  createRunId,
+  debugLoggingEnabled,
+  dlog,
+  type DebugLogLevel,
+} from "../shared/debug-log";
 
 type SessionMetadata = {
   session_id?: string;
@@ -61,15 +67,16 @@ const readLoreAuthSummary = async (): Promise<LoreAuthSummary> => {
 
 const warnIfLlmIngestionUnavailable = async (
   warn: (message: string) => void,
-): Promise<void> => {
+): Promise<boolean> => {
   const auth = await readLoreAuthSummary();
   if (auth.authMode !== "chatgpt" || auth.hasApiKey) {
-    return;
+    return false;
   }
 
   warn(
     'Lore reminder: LLM ingestion is inactive because Codex auth_mode="chatgpt" has no OPENAI_API_KEY. Shared knowledge still works, but automatic extraction needs API-key-backed Codex config.',
   );
+  return true;
 };
 
 const deriveProjectId = (cwd: string): string => {
@@ -123,11 +130,50 @@ export const runSessionStart = async (
   stdinData?: string,
   dependencies?: SessionStartDependencies,
 ): Promise<{ additionalContext: string }> => {
+  const startedAt = Date.now();
+  const runId = debugLoggingEnabled ? createRunId() : undefined;
   const config = dependencies?.config ?? resolveConfig();
   const warn = dependencies?.warn ?? writeWarning;
+  const log = (
+    level: DebugLogLevel,
+    event: string,
+    data?: Record<string, unknown>,
+    extras?: {
+      ok?: boolean;
+      summary?: string;
+      durationMs?: number;
+      sessionId?: string;
+      sessionKey?: string;
+      projectId?: string;
+    },
+  ): void => {
+    if (!runId) {
+      return;
+    }
+
+    dlog({
+      level,
+      component: "session-start",
+      event,
+      hook: "SessionStart",
+      runId,
+      sessionId: extras?.sessionId ?? metadata.session_id,
+      sessionKey: extras?.sessionKey,
+      projectId: extras?.projectId,
+      ok: extras?.ok,
+      summary: extras?.summary,
+      durationMs: extras?.durationMs,
+      data,
+    });
+  };
 
   let metadata: SessionMetadata = {};
   const input = stdinData ?? (await readStdin());
+  let parsedOk = true;
+  log("debug", "session_start.invoked", {
+    inputLength: input.length,
+    hasStdinData: stdinData !== undefined,
+  });
 
   try {
     if (input.trim().length > 0) {
@@ -135,10 +181,36 @@ export const runSessionStart = async (
     }
   } catch {
     // Malformed input — proceed with empty metadata
+    parsedOk = false;
+    log("warn", "session_start.stdin_parsed", {
+      inputLength: input.length,
+      parsed: false,
+    }, {
+      ok: false,
+      summary: "SessionStart input was malformed; proceeding with empty metadata.",
+    });
+  }
+
+  if (parsedOk) {
+    log("debug", "session_start.stdin_parsed", {
+      parsed: true,
+      cwd: metadata.cwd,
+      model: metadata.model,
+      hasSessionId: metadata.session_id !== undefined,
+    }, {
+      ok: true,
+    });
   }
 
   const cwd = metadata.cwd ?? process.cwd();
   const currentProjectId = deriveProjectId(cwd);
+  log("debug", "session_start.project_derived", {
+    cwd,
+    model: metadata.model,
+  }, {
+    ok: true,
+    projectId: currentProjectId,
+  });
 
   const sharedStore = new FileSharedStore({
     storagePath: config.sharedStoragePath,
@@ -169,13 +241,15 @@ export const runSessionStart = async (
     await consolidator.run();
   };
 
-  const runConsolidationWithTimeout = async (): Promise<void> => {
+  const runConsolidationWithTimeout = async (): Promise<"completed" | "timed_out"> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([
-        runConsolidationPass(),
-        new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, config.consolidationTimeoutMs);
+      return await Promise.race([
+        runConsolidationPass().then(() => "completed" as const),
+        new Promise<"timed_out">((resolve) => {
+          timer = setTimeout(() => {
+            resolve("timed_out");
+          }, config.consolidationTimeoutMs);
           timer.unref?.();
         }),
       ]);
@@ -200,12 +274,46 @@ export const runSessionStart = async (
 
   try {
     try {
-      await runConsolidationWithTimeout();
-    } catch {
+      log("debug", "session_start.consolidation.begin", undefined, {
+        ok: true,
+        projectId: currentProjectId,
+      });
+      const consolidationResult = await runConsolidationWithTimeout();
+      if (consolidationResult === "timed_out") {
+        log("warn", "session_start.consolidation.timeout", {
+          timeoutMs: config.consolidationTimeoutMs,
+        }, {
+          ok: false,
+          summary: "SessionStart consolidation timed out.",
+          projectId: currentProjectId,
+        });
+      } else {
+        log("debug", "session_start.consolidation.done", {
+          timeoutMs: config.consolidationTimeoutMs,
+        }, {
+          ok: true,
+          projectId: currentProjectId,
+        });
+      }
+    } catch (error) {
       // Consolidation is advisory only at startup.
+      log("warn", "session_start.consolidation.error", {
+        error: error instanceof Error ? error.message : String(error),
+      }, {
+        ok: false,
+        summary: "SessionStart consolidation failed but was treated as advisory.",
+        projectId: currentProjectId,
+      });
     }
 
-    await warnIfLlmIngestionUnavailable(warn);
+    const llmIngestionUnavailable = await warnIfLlmIngestionUnavailable(warn);
+    if (llmIngestionUnavailable) {
+      log("warn", "session_start.llm_ingestion_unavailable", undefined, {
+        ok: false,
+        summary: "LLM ingestion is unavailable under the current Codex auth configuration.",
+        projectId: currentProjectId,
+      });
+    }
 
     const result = await buildSessionStartContext({
       store: sharedStore,
@@ -213,9 +321,30 @@ export const runSessionStart = async (
       currentTags,
       config: config.sessionStart,
     });
+    log("debug", "session_start.context_built", {
+      currentTags,
+      selectedCount: result.selectedEntries.length,
+      injectedContentHashes: result.injectedContentHashes,
+    }, {
+      ok: true,
+      projectId: currentProjectId,
+    });
+    log("debug", "session_start.entries_selected", {
+      selectedIds: result.selectedEntries.map((entry) => entry.id),
+      selectedKinds: result.selectedEntries.map((entry) => entry.kind),
+    }, {
+      ok: true,
+      projectId: currentProjectId,
+    });
     const pendingCount = (
       await sharedStore.list({ approvalStatus: "pending" })
     ).length;
+    log("debug", "session_start.pending_count", {
+      pendingCount,
+    }, {
+      ok: true,
+      projectId: currentProjectId,
+    });
 
     // Initialize whisper state with injected content hashes (if session_id available)
     if (metadata.session_id) {
@@ -227,6 +356,13 @@ export const runSessionStart = async (
           config.whisperStateDir,
           config.whisper,
         );
+        log("trace", "session_start.whisper_state_initialized", {
+          injectedContentHashCount: result.injectedContentHashes.length,
+        }, {
+          ok: true,
+          sessionKey,
+          projectId: currentProjectId,
+        });
       } catch {
         // Whisper state init failure is non-fatal
       }
@@ -239,10 +375,34 @@ export const runSessionStart = async (
       capabilities,
       pendingCount,
     });
+    log("debug", "session_start.template_rendered", {
+      pendingCount,
+      selectedCount: result.selectedEntries.length,
+      templateBytes: Buffer.byteLength(template ?? "", "utf8"),
+    }, {
+      ok: true,
+      projectId: currentProjectId,
+    });
+    log("info", "session_start.completed", {
+      additionalContextBytes: Buffer.byteLength(template ?? "", "utf8"),
+    }, {
+      ok: true,
+      durationMs: Date.now() - startedAt,
+      summary: "SessionStart completed.",
+      projectId: currentProjectId,
+    });
 
     return { additionalContext: template ?? "" };
-  } catch {
+  } catch (error) {
     // On any error, return empty context rather than crashing
+    log("error", "session_start.error", {
+      error: error instanceof Error ? error.message : String(error),
+    }, {
+      ok: false,
+      durationMs: Date.now() - startedAt,
+      summary: "SessionStart failed and returned empty context.",
+      projectId: currentProjectId,
+    });
     return { additionalContext: "" };
   }
 };

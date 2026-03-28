@@ -4,7 +4,7 @@ import { Readable, Writable } from "node:stream";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createLoreApp } from "../src/app";
 import { runCli } from "../src/cli";
@@ -33,6 +33,8 @@ afterEach(async () => {
       await rm(path, { recursive: true, force: true });
     }),
   );
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
 
 describe("runCli", () => {
@@ -120,5 +122,37 @@ describe("runCli", () => {
     expect(stderr).toBe("");
     expect(stdout).toContain("Lore CLI");
     expect(stdout).toContain("list-shared");
+  });
+
+  it("emits CLI trace events to stderr when debug logging is enabled", async () => {
+    vi.resetModules();
+    vi.stubEnv("LORE_DEBUG", "trace");
+    const stdout = createWritable();
+    const stderr = createWritable();
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(((chunk: string | Uint8Array): boolean => {
+        stderrWrites.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write);
+    const { runCli: runCliWithLogging } = await import("../src/cli");
+
+    const exitCode = await runCliWithLogging(
+      ["help"],
+      {
+        stdin: Readable.from([]),
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      },
+    );
+    stderrSpy.mockRestore();
+
+    expect(exitCode).toBe(0);
+    expect(stdout.read()).toContain("Lore CLI");
+    expect(stderr.read()).toBe("");
+    const lines = stderrWrites.join("").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { event: string });
+    expect(lines.some((line) => line.event === "cli.command_started")).toBe(true);
+    expect(lines.some((line) => line.event === "cli.command_succeeded")).toBe(true);
   });
 });

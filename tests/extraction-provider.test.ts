@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   extractDraftCandidates,
@@ -60,6 +60,11 @@ const makePendingEntry = (): SharedKnowledgeEntry => ({
   contentHash: contentHash("Use snake_case for columns."),
   createdAt: "2026-03-28T19:40:00.000Z",
   updatedAt: "2026-03-28T19:40:00.000Z",
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
 
 describe("provider seams", () => {
@@ -217,5 +222,89 @@ describe("CodexExtractionProvider auth warnings", () => {
 
     expect(result).toEqual([]);
     expect(warnings).toHaveLength(0);
+  });
+
+  it("emits trace events when extraction logging is enabled", async () => {
+    vi.resetModules();
+    vi.stubEnv("LORE_DEBUG", "trace");
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(((chunk: string | Uint8Array): boolean => {
+        stderrWrites.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write);
+
+    const { CodexExtractionProvider: ExtractionProviderWithLogging } = await import(
+      "../src/extraction/codex-extraction-provider"
+    );
+    const provider = new ExtractionProviderWithLogging({
+      readFile: async (path: string): Promise<string> => {
+        if (path.endsWith("/.codex/auth.json")) {
+          return JSON.stringify({ OPENAI_API_KEY: "sk-test" });
+        }
+        if (path.endsWith("/.codex/config.toml")) {
+          return 'base_url = "https://api.example.com/v1"\nmodel = "gpt-5.4"\n';
+        }
+        throw new Error("missing");
+      },
+      fetch: async (): Promise<Response> =>
+        new Response(JSON.stringify({
+          output_text: JSON.stringify([{
+            kind: "domain_rule",
+            title: "Use snake_case",
+            content: "All database columns use snake_case naming.",
+            confidence: 0.9,
+          }]),
+        }), { status: 200 }),
+    });
+
+    const result = await provider.extractCandidates(makeTurnArtifact());
+    stderrSpy.mockRestore();
+
+    expect(result).toHaveLength(1);
+    const lines = stderrWrites
+      .join("")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { event: string });
+    expect(lines.some((line) => line.event === "extraction.config_loaded")).toBe(true);
+    expect(lines.some((line) => line.event === "extraction.llm_request_started")).toBe(true);
+    expect(lines.some((line) => line.event === "extraction.candidates_parsed")).toBe(true);
+  });
+
+  it("emits a skip trace when extraction config is incomplete", async () => {
+    vi.resetModules();
+    vi.stubEnv("LORE_DEBUG", "trace");
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(((chunk: string | Uint8Array): boolean => {
+        stderrWrites.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write);
+
+    const { CodexExtractionProvider: ExtractionProviderWithLogging } = await import(
+      "../src/extraction/codex-extraction-provider"
+    );
+    const provider = new ExtractionProviderWithLogging({
+      readFile: async (): Promise<string> => {
+        throw new Error("missing");
+      },
+    });
+
+    const result = await provider.extractCandidates(makeTurnArtifact());
+    stderrSpy.mockRestore();
+
+    expect(result).toEqual([]);
+    const lines = stderrWrites
+      .join("")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { event: string; data?: { reason?: string } });
+    expect(lines.some((line) => line.event === "extraction.llm_skipped")).toBe(true);
+    expect(lines.some((line) => line.data?.reason === "missing_api_key")).toBe(true);
   });
 });

@@ -180,4 +180,34 @@ describe("STDIO transport", () => {
     expect(response.error).toBeTruthy();
     expect(response.error.code).toBe(-32601);
   });
+
+  it("emits MCP trace events to stderr when debug logging is enabled", async () => {
+    const request = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: {
+        name: "lore.recall_rules",
+        arguments: {},
+      },
+    });
+
+    const { stderr } = await sendToTransport(
+      request + "\n",
+      {
+        LORE_SHARED_STORE_PATH: sharedStorePath,
+        LORE_DEBUG: "trace",
+      },
+    );
+
+    const lines = stderr
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { event: string });
+    expect(lines.some((line) => line.event === "mcp.request_received")).toBe(true);
+    expect(lines.some((line) => line.event === "mcp.tool_called")).toBe(true);
+    expect(lines.some((line) => line.event === "mcp.tool_succeeded")).toBe(true);
+    expect(lines.some((line) => line.event === "mcp.response_sent")).toBe(true);
+  });
 });

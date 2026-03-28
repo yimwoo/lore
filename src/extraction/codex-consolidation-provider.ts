@@ -10,6 +10,12 @@ import type {
   ConsolidationResult,
 } from "./consolidation-provider";
 import type { DraftCandidate } from "../shared/types";
+import {
+  createRunId,
+  debugLoggingEnabled,
+  dlog,
+  type DebugLogLevel,
+} from "../shared/debug-log";
 
 const AUTH_PATH = join(homedir(), ".codex", "auth.json");
 const CONFIG_PATH = join(homedir(), ".codex", "config.toml");
@@ -138,12 +144,64 @@ const buildFallbackResult = (input: ConsolidationInput): ConsolidationResult => 
 
 export class CodexConsolidationProvider implements ConsolidationProvider {
   async consolidate(input: ConsolidationInput): Promise<ConsolidationResult> {
+    const runId = debugLoggingEnabled ? createRunId() : undefined;
+    const log = (
+      level: DebugLogLevel,
+      event: string,
+      data?: Record<string, unknown>,
+      extras?: {
+        ok?: boolean;
+        summary?: string;
+      },
+    ): void => {
+      if (!runId) {
+        return;
+      }
+
+      dlog({
+        level,
+        component: "codex-consolidation-provider",
+        event,
+        hook: "Core",
+        runId,
+        ok: extras?.ok,
+        summary: extras?.summary,
+        data,
+      });
+    };
     const config = await readCodexProviderConfig();
+    log("trace", "consolidation_provider.config_loaded", {
+      hasApiKey: config.apiKey !== undefined,
+      hasBaseUrl: config.baseUrl !== undefined,
+      model: config.model,
+      draftCount: input.drafts.length,
+    }, {
+      ok: true,
+    });
     if (!config.apiKey || !config.baseUrl) {
+      log("debug", "consolidation_provider.llm_skipped", {
+        reason: !config.apiKey ? "missing_api_key" : "missing_base_url",
+      }, {
+        ok: true,
+        summary: "Live consolidation was skipped because Codex config is incomplete.",
+      });
+      log("debug", "consolidation_provider.fallback_used", {
+        draftCount: input.drafts.length,
+      }, {
+        ok: true,
+        summary: "Deterministic consolidation fallback was used.",
+      });
       return buildFallbackResult(input);
     }
 
     // Keep a deterministic fallback until the live model prompt is tuned.
+    log("debug", "consolidation_provider.fallback_used", {
+      draftCount: input.drafts.length,
+      reason: "llm_consolidation_not_enabled",
+    }, {
+      ok: true,
+      summary: "Deterministic consolidation fallback was used even though config is present.",
+    });
     return buildFallbackResult(input);
   }
 }

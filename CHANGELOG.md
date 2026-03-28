@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.3.2] - 2026-03-28
+
+### Added
+
+- Developer-only structured JSONL tracing with `LORE_DEBUG` and optional `LORE_LOG_FILE`, including a shared debug logger and focused logger unit tests.
+
+### Changed
+
+- Added trace instrumentation for SessionStart, pre-prompt whispering, Stop-hook extraction, consolidation, promotion, MCP stdio transport, and CLI command execution.
+- Added test coverage for tracing behavior while preserving stdout protocol correctness and keeping pure modules free of logging I/O.
+
 ## [1.3.1] - 2026-03-28
 
 ### Added

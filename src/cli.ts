@@ -16,6 +16,12 @@ import { resolveConfig } from "./config";
 import type { LoreSnapshot } from "./core/daemon";
 import type { MemoryEntry, SharedKnowledgeEntry, SharedKnowledgeKind } from "./shared/types";
 import { isSharedKnowledgeKind } from "./shared/types";
+import {
+  createRunId,
+  debugLoggingEnabled,
+  dlog,
+  type DebugLogLevel,
+} from "./shared/debug-log";
 
 type CliStreams = {
   stdin: Readable;
@@ -503,60 +509,167 @@ export const runCli = async (
   },
 ): Promise<number> => {
   const parsed = parseArgs(argv);
+  const startedAt = Date.now();
+  const runId = debugLoggingEnabled ? createRunId() : undefined;
+  const log = (
+    level: DebugLogLevel,
+    event: string,
+    data?: Record<string, unknown>,
+    extras?: {
+      ok?: boolean;
+      summary?: string;
+    },
+  ): void => {
+    if (!runId) {
+      return;
+    }
+
+    dlog({
+      level,
+      component: "cli",
+      event,
+      hook: "CLI",
+      runId,
+      ok: extras?.ok,
+      summary: extras?.summary,
+      durationMs: Date.now() - startedAt,
+      data,
+    });
+  };
+  log("debug", "cli.command_started", {
+    command: parsed.command,
+    positionalCount: parsed.positional.length,
+    optionKeys: Object.keys(parsed.options),
+  }, {
+    ok: true,
+  });
 
   try {
     switch (parsed.command) {
       case "demo":
         await runDemo(parsed.options, streams);
+        log("info", "cli.command_succeeded", {
+          command: parsed.command,
+        }, {
+          ok: true,
+          summary: "Lore CLI command completed successfully.",
+        });
         return 0;
       case "serve":
         await runServe(parsed.options, streams);
+        log("info", "cli.command_succeeded", {
+          command: parsed.command,
+        }, {
+          ok: true,
+          summary: "Lore CLI command completed successfully.",
+        });
         return 0;
       case "memories":
         await runMemories(parsed.options, streams);
+        log("info", "cli.command_succeeded", {
+          command: parsed.command,
+        }, {
+          ok: true,
+          summary: "Lore CLI command completed successfully.",
+        });
         return 0;
       case "promote":
         await runPromote(parsed.options, streams);
+        log("info", "cli.command_succeeded", {
+          command: parsed.command,
+        }, {
+          ok: true,
+          summary: "Lore CLI command completed successfully.",
+        });
         return 0;
       case "list-shared":
         await runListShared(parsed.options, streams);
+        log("info", "cli.command_succeeded", {
+          command: parsed.command,
+        }, {
+          ok: true,
+          summary: "Lore CLI command completed successfully.",
+        });
         return 0;
       case "inspect": {
         const inspectId = parsed.positional[0];
         if (!inspectId) throw new Error("Missing entry ID for inspect command.");
         await runInspect(parsed.options, streams, inspectId);
+        log("info", "cli.command_succeeded", {
+          command: parsed.command,
+        }, {
+          ok: true,
+          summary: "Lore CLI command completed successfully.",
+        });
         return 0;
       }
       case "demote": {
         const demoteId = parsed.positional[0];
         if (!demoteId) throw new Error("Missing entry ID for demote command.");
         await runDemote(parsed.options, streams, demoteId);
+        log("info", "cli.command_succeeded", {
+          command: parsed.command,
+        }, {
+          ok: true,
+          summary: "Lore CLI command completed successfully.",
+        });
         return 0;
       }
       case "approve": {
         const approveId = parsed.positional[0];
         if (!approveId) throw new Error("Missing entry ID for approve command.");
         await runApprove(parsed.options, streams, approveId);
+        log("info", "cli.command_succeeded", {
+          command: parsed.command,
+        }, {
+          ok: true,
+          summary: "Lore CLI command completed successfully.",
+        });
         return 0;
       }
       case "reject": {
         const rejectId = parsed.positional[0];
         if (!rejectId) throw new Error("Missing entry ID for reject command.");
         await runReject(parsed.options, streams, rejectId);
+        log("info", "cli.command_succeeded", {
+          command: parsed.command,
+        }, {
+          ok: true,
+          summary: "Lore CLI command completed successfully.",
+        });
         return 0;
       }
       case "suggest":
         await runSuggest(parsed.options, streams);
+        log("info", "cli.command_succeeded", {
+          command: parsed.command,
+        }, {
+          ok: true,
+          summary: "Lore CLI command completed successfully.",
+        });
         return 0;
       case "help":
       case "--help":
       case "-h":
       default:
         await writeOutput(streams.stdout, helpText);
+        log("info", "cli.command_succeeded", {
+          command: parsed.command,
+        }, {
+          ok: true,
+          summary: "Lore CLI command completed successfully.",
+        });
         return 0;
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    log("warn", "cli.command_failed", {
+      command: parsed.command,
+      error: message,
+    }, {
+      ok: false,
+      summary: "Lore CLI command failed.",
+    });
     await writeOutput(streams.stderr, `Lore CLI error: ${message}`);
     return 1;
   }

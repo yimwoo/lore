@@ -1,7 +1,7 @@
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FileSharedStore } from "../src/core/file-shared-store";
 import { DraftStoreWriter, readConsolidationState } from "../src/promotion/draft-store";
@@ -72,6 +72,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(testDir, { recursive: true, force: true });
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
 
 describe("Consolidator", () => {
@@ -219,5 +221,109 @@ describe("Consolidator", () => {
     const state = await readConsolidationState(join(testDir, "consolidation-state.json"));
     expect(state.lastStatus).toBe("error");
     expect(state.lastConsolidatedAt).toBeUndefined();
+  });
+
+  it("emits structured consolidator trace events when debug logging is enabled", async () => {
+    vi.resetModules();
+    vi.stubEnv("LORE_DEBUG", "trace");
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(((chunk: string | Uint8Array): boolean => {
+        stderrWrites.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write);
+
+    const draftDir = join(testDir, "drafts");
+    const observationDir = join(testDir, "observations");
+    const sharedStore = new FileSharedStore({
+      storagePath: join(testDir, "shared.json"),
+      now: makeTimestamp,
+      createId: () => `sk-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: join(testDir, "approval-ledger.json"),
+      sharedStore,
+      now: makeTimestamp,
+      createId: () => `ledger-${String(idCounter++).padStart(4, "0")}`,
+    });
+
+    await new DraftStoreWriter({
+      draftDir,
+      sessionId: "session-1",
+    }).append(makeDraft());
+
+    const provider: ConsolidationProvider = {
+      consolidate: async (input) => ({
+        entries: input.drafts.map((draft) => ({
+          entry: makePendingEntry({
+            id: "",
+            title: draft.title,
+            content: draft.content,
+            contentHash: contentHash(draft.content),
+          }),
+          consumedEntryIds: [],
+        })),
+      }),
+    };
+
+    const { Consolidator: ConsolidatorWithLogging } = await import("../src/promotion/consolidator");
+    const consolidator = new ConsolidatorWithLogging({
+      draftReader: new DraftStoreReader({ draftDir }),
+      observationReader: new ObservationLogReader({ observationDir }),
+      sharedStore,
+      approvalStore,
+      provider,
+      statePath: join(testDir, "consolidation-state.json"),
+      now: makeTimestamp,
+    });
+
+    const result = await consolidator.run();
+    stderrSpy.mockRestore();
+
+    expect(result.ok).toBe(true);
+    const lines = stderrWrites
+      .join("")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { event: string });
+    expect(lines.some((line) => line.event === "consolidation.invoked")).toBe(true);
+    expect(lines.some((line) => line.event === "consolidation.drafts_loaded")).toBe(true);
+    expect(lines.some((line) => line.event === "consolidation.entry_saved")).toBe(true);
+    expect(lines.some((line) => line.event === "consolidation.completed")).toBe(true);
+  });
+
+  it("emits consolidation provider fallback trace events", async () => {
+    vi.resetModules();
+    vi.stubEnv("LORE_DEBUG", "trace");
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(((chunk: string | Uint8Array): boolean => {
+        stderrWrites.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write);
+
+    const { CodexConsolidationProvider: ProviderWithLogging } = await import(
+      "../src/extraction/codex-consolidation-provider"
+    );
+    const provider = new ProviderWithLogging();
+    const result = await provider.consolidate({
+      drafts: [makeDraft()],
+      observations: [],
+      existingPendingEntries: [],
+    });
+    stderrSpy.mockRestore();
+
+    expect(result.entries).toHaveLength(1);
+    const lines = stderrWrites
+      .join("")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { event: string });
+    expect(lines.some((line) => line.event === "consolidation_provider.config_loaded")).toBe(true);
+    expect(lines.some((line) => line.event === "consolidation_provider.fallback_used")).toBe(true);
   });
 });

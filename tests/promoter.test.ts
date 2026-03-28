@@ -1,7 +1,7 @@
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FileSharedStore } from "../src/core/file-shared-store";
 import { FileApprovalStore } from "../src/promotion/approval-store";
@@ -55,6 +55,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(testDir, { recursive: true, force: true });
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
 
 describe("Promoter.promoteExplicit", () => {
@@ -442,5 +444,54 @@ describe("Promoter.reject", () => {
     const result = await promoter.reject("nonexistent", "reason");
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toContain("not found");
+  });
+
+  it("emits promoter trace events when debug logging is enabled", async () => {
+    vi.resetModules();
+    vi.stubEnv("LORE_DEBUG", "trace");
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(((chunk: string | Uint8Array): boolean => {
+        stderrWrites.push(String(chunk));
+        return true;
+      }) as typeof process.stderr.write);
+
+    const { Promoter: PromoterWithLogging } = await import("../src/promotion/promoter");
+    const sharedStore = new FileSharedStore({
+      storagePath: join(testDir, "logging-shared.json"),
+      now: makeTimestamp,
+      createId: () => `sk-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: join(testDir, "logging-ledger.json"),
+      sharedStore,
+      now: makeTimestamp,
+      createId: () => `ledger-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const promoter = new PromoterWithLogging({
+      sharedStore,
+      approvalStore,
+      policy: resolveConfig().promotionPolicy,
+      now: makeTimestamp,
+      createId: () => `sk-${String(idCounter++).padStart(4, "0")}`,
+    });
+
+    const result = await promoter.promoteExplicit({
+      kind: "domain_rule",
+      title: "Use snake_case",
+      content: "All DB columns must use snake_case",
+    });
+    stderrSpy.mockRestore();
+
+    expect(result.ok).toBe(true);
+    const lines = stderrWrites
+      .join("")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { event: string });
+    expect(lines.some((line) => line.event === "promotion.promote_requested")).toBe(true);
+    expect(lines.some((line) => line.event === "promotion.promote_created")).toBe(true);
   });
 });

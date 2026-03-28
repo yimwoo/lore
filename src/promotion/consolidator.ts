@@ -11,6 +11,12 @@ import type {
   ConsolidationObservation,
 } from "../extraction/consolidation-provider";
 import type { DraftCandidate, SharedKnowledgeEntry } from "../shared/types";
+import {
+  createRunId,
+  debugLoggingEnabled,
+  dlog,
+  type DebugLogLevel,
+} from "../shared/debug-log";
 
 type ConsolidatorOptions = {
   draftReader: DraftStoreReader;
@@ -171,8 +177,48 @@ export class Consolidator {
   }
 
   async run(): Promise<ConsolidationRunResult> {
+    const startedAtMs = Date.now();
+    const runId = debugLoggingEnabled ? createRunId() : undefined;
+    const log = (
+      level: DebugLogLevel,
+      event: string,
+      data?: Record<string, unknown>,
+      extras?: {
+        ok?: boolean;
+        summary?: string;
+      },
+    ): void => {
+      if (!runId) {
+        return;
+      }
+
+      dlog({
+        level,
+        component: "consolidator",
+        event,
+        hook: "Core",
+        runId,
+        ok: extras?.ok,
+        summary: extras?.summary,
+        durationMs: Date.now() - startedAtMs,
+        data,
+      });
+    };
     const state = await readConsolidationState(this.statePath);
     const startedAt = this.now();
+    log("info", "consolidation.invoked", {
+      statePath: this.statePath,
+    }, {
+      ok: true,
+      summary: "Consolidation run started.",
+    });
+    log("debug", "consolidation.state_loaded", {
+      lastConsolidatedAt: state.lastConsolidatedAt,
+      lastAttemptedAt: state.lastAttemptedAt,
+      lastStatus: state.lastStatus,
+    }, {
+      ok: true,
+    });
     await writeConsolidationState(this.statePath, {
       ...state,
       lastAttemptedAt: startedAt,
@@ -181,7 +227,17 @@ export class Consolidator {
     });
 
     const drafts = await this.draftReader.readSince(state.lastConsolidatedAt);
+    log("debug", "consolidation.drafts_loaded", {
+      draftCount: drafts.length,
+      sinceCutoff: state.lastConsolidatedAt,
+    }, {
+      ok: true,
+    });
     if (drafts.length === 0) {
+      log("debug", "consolidation.no_new_drafts", undefined, {
+        ok: true,
+        summary: "No new drafts were available for consolidation.",
+      });
       return {
         ok: true,
         processedDraftCount: 0,
@@ -192,13 +248,34 @@ export class Consolidator {
 
     try {
       const observations = await aggregateObservations(this.observationReader);
+      log("debug", "consolidation.observations_aggregated", {
+        observationCount: observations.length,
+      }, {
+        ok: true,
+      });
       const existingPendingEntries = await this.sharedStore.list({
         approvalStatus: "pending",
+      });
+      log("debug", "consolidation.pending_loaded", {
+        pendingCount: existingPendingEntries.length,
+      }, {
+        ok: true,
+      });
+      log("debug", "consolidation.provider_started", {
+        draftCount: drafts.length,
+        pendingCount: existingPendingEntries.length,
+      }, {
+        ok: true,
       });
       const result = await this.provider.consolidate({
         drafts,
         observations,
         existingPendingEntries,
+      });
+      log("debug", "consolidation.provider_done", {
+        entryCount: result.entries.length,
+      }, {
+        ok: true,
       });
 
       const savedEntryIds: string[] = [];
@@ -207,12 +284,23 @@ export class Consolidator {
       for (const consolidated of result.entries) {
         const survivorId = await reconcilePendingEntry(this.sharedStore, consolidated.entry);
         savedEntryIds.push(survivorId);
+        log("debug", "consolidation.entry_saved", {
+          survivorId,
+        }, {
+          ok: true,
+        });
 
         const consumedIds = consolidated.consumedEntryIds.filter((id) => id !== survivorId);
         if (consumedIds.length > 0) {
           await deleteConsumedPendingEntries(this.sharedStore, survivorId, consumedIds);
           await appendMergeLedgerEntry(this.approvalStore, survivorId, consumedIds);
           mergedEntryIds.push(...consumedIds);
+          log("debug", "consolidation.entries_merged", {
+            survivorId,
+            consumedIds,
+          }, {
+            ok: true,
+          });
         }
       }
 
@@ -225,6 +313,19 @@ export class Consolidator {
         lastConsolidatedAt,
         lastStatus: "ok",
         lastError: undefined,
+      });
+      log("debug", "consolidation.state_written", {
+        lastConsolidatedAt,
+      }, {
+        ok: true,
+      });
+      log("info", "consolidation.completed", {
+        processedDraftCount: drafts.length,
+        savedEntryIds,
+        mergedEntryIds,
+      }, {
+        ok: true,
+        summary: "Consolidation completed successfully.",
       });
 
       return {
@@ -239,6 +340,13 @@ export class Consolidator {
         lastAttemptedAt: startedAt,
         lastStatus: "error",
         lastError: error instanceof Error ? error.message : String(error),
+      });
+      log("error", "consolidation.error", {
+        error: error instanceof Error ? error.message : String(error),
+        processedDraftCount: drafts.length,
+      }, {
+        ok: false,
+        summary: "Consolidation failed.",
       });
       return {
         ok: false,

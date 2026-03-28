@@ -1,6 +1,6 @@
 {
   "name": "codex-lore",
-  "version": "1.2.3",
+  "version": "1.3.1",
   "description": "Persistent cross-project memory for Codex — rules, decisions, and context that follow you.",
   "license": "MIT",
   "homepage": "https://github.com/yimwoo/lore",

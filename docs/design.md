@@ -29,7 +29,7 @@ Lore is structured as five layers with strict separation:
 | --- | --- | --- |
 | **Core library** | `src/core/`, `src/bridge/`, `src/shared/` | Reusable engine — memory store, shared store, hint engine, daemon, candidate extractor, types, validators. No plugin runtime assumptions. |
 | **Plugin integration** | `src/plugin/` | SessionStart injection, capability-aware instruction template, pre-prompt whisper, stop observer, context building, whisper scoring. Plugin-facing only. |
-| **Promotion** | `src/promotion/` | Promoter, policy, approval store, observation log, suggestion engine. |
+| **Promotion** | `src/promotion/` | Promoter, policy, approval store, observation log, draft store, consolidator. |
 | **MCP surface** | `src/mcp/` | Thin adapter exposing domain services as MCP recall tools via JSON-RPC 2.0 over stdio. |
 | **Config** | `src/config.ts` | Single source for all paths, thresholds, scoring weights, and policy defaults. |
 
@@ -75,7 +75,7 @@ Three Codex hooks drive the runtime:
 
 1. **SessionStart** — fires once when a session opens. Selects high-value shared knowledge entries, initializes whisper state with `injectedContentHashes` for downstream dedup, and renders the instruction template.
 2. **UserPromptSubmit** (sync, targets <200ms) — fires before each prompt. Scores shared entries and hint bullets against the current prompt, applies repetition decay, formats the `[Lore]` whisper block. Owns all whisper state writes.
-3. **Stop** (async) — fires after each turn completes. Updates session context (turn index, recent files, recent tool names) so the next whisper decision has fresh signals. Does not write whisper decisions.
+3. **Stop** (async) — fires after each turn completes. Updates session context (turn index, recent files, recent tool names) and may draft candidate shared knowledge asynchronously. Does not write whisper decisions.
 
 If `session_id` is missing from hook stdin, all whisper hooks no-op silently.
 
@@ -255,7 +255,7 @@ No transitions from `rejected` or `demoted`. Re-promoting creates a new entry.
 ### Paths to shared knowledge
 
 - **Explicit promotion** — you promote knowledge manually via CLI (`lore promote`). Auto-approved with `confidence: 1.0`, skips pending state.
-- **Suggestion engine** — scans observation logs for patterns meeting kind-specific thresholds across sessions and projects. Candidates enter as `pending` with `promotionSource: "suggested"` and require your explicit `approve`.
+- **Draft + consolidate** — the Stop hook drafts candidate knowledge from recent turns, and SessionStart consolidation merges and rewrites those drafts into evidence-backed pending entries with `promotionSource: "suggested"`.
 - **Demotion** — soft-delete with full audit trail. Nothing is ever hard-deleted. The ledger preserves the complete history.
 
 ### Deduplication on promote
@@ -269,9 +269,14 @@ When promoting, the system checks for existing entries with the same `contentHas
 
 All state-changing operations (promote, demote, approve, reject) write to the approval ledger **before** updating the shared store. This enables crash recovery — if the process dies between the ledger write and the store update, reconciliation can replay the ledger to restore consistency. Reconciliation is idempotent and runs on first access.
 
-### Suggestion engine
+### Consolidation-backed pending drafts
 
-The suggestion engine (`src/promotion/suggestion-engine.ts`) aggregates observation log entries across all sessions and projects. For each unique `contentHash + kind`, it checks against kind-specific promotion criteria:
+Pending entries are produced by the consolidator, which combines two signal sources:
+
+- **Draft candidates** from the Stop hook's async extraction path
+- **Observation evidence** from the per-session observation logs
+
+The observation layer still provides cross-session strength signals:
 
 | Kind | Eligibility | Min Confidence | Min Sessions | Min Projects |
 | --- | --- | --- | --- | --- |
@@ -283,7 +288,9 @@ The suggestion engine (`src/promotion/suggestion-engine.ts`) aggregates observat
 
 `decision_record` entries require explicit promotion and are never auto-suggested.
 
-Observations are written by the daemon during event ingestion (when an observation directory is configured). Each session writes to its own JSONL file at `~/.lore/observations/<sessionId>.jsonl`. The reader aggregates across all files to derive `sessionCount`, `projectCount`, and `lastSeenAt`. Old observation files are cleaned up after 90 days.
+Observations are written by the daemon during event ingestion (when an observation directory is configured). Each session writes to its own JSONL file at `~/.lore/observations/<sessionId>.jsonl`. The consolidator uses these files to derive `sessionCount`, `projectCount`, and `lastSeenAt`.
+
+Draft candidates are written separately to `~/.lore/drafts/<sessionId>.jsonl`, and SessionStart consolidation advances a watermark stored in `~/.lore/consolidation-state.json`.
 
 ## Shared Knowledge Kinds
 
@@ -319,6 +326,8 @@ All data lives locally on your machine:
   shared.json              Shared knowledge entries
   approval-ledger.json     Append-only audit trail
   observations/            Per-session observation logs (JSONL)
+  drafts/                  Per-session extracted draft candidates (JSONL)
+  consolidation-state.json SessionStart consolidation watermark
   whisper-sessions/        Per-session whisper state
   projects/                Per-project memory files (keyed by sha256(projectId))
 ```
@@ -343,7 +352,7 @@ The CLI (`src/cli.ts`) provides all management operations:
 | `lore demote <id>` | Soft-delete an entry (requires `--reason`) |
 | `lore approve <id>` | Approve a pending suggestion |
 | `lore reject <id>` | Reject a pending suggestion (requires `--reason`) |
-| `lore suggest` | Run the suggestion engine on observation logs |
+| `lore suggest` | Show observation/debug info for the retired suggestion path |
 | `lore demo` | Run a simulated session with sample events |
 | `lore serve` | Read newline-delimited JSON events from stdin |
 | `lore memories` | Print stored project memories |

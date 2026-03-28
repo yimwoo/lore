@@ -91,6 +91,23 @@ describe("FileApprovalStore", () => {
     expect(entries[0]!.timestamp).toBeTruthy();
   });
 
+  it("supports merge ledger entries", async () => {
+    const sharedStore = makeSharedStore();
+    const store = makeApprovalStore(sharedStore);
+
+    await store.append({
+      knowledgeEntryId: "sk-merged-1",
+      action: "merge",
+      actor: "system",
+      reason: "merged duplicate pending entries",
+    });
+
+    const entries = await store.readAll();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.action).toBe("merge");
+    expect(entries[0]!.actor).toBe("system");
+  });
+
   it("filters by knowledgeEntryId", async () => {
     const sharedStore = makeSharedStore();
     const store = makeApprovalStore(sharedStore);

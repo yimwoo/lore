@@ -201,6 +201,31 @@ export class FileSharedStore implements SharedKnowledgeStore {
     });
   }
 
+  async deletePending(id: string): Promise<StoreResult> {
+    const lock = await this.acquireLock();
+    if (!lock.ok) {
+      return { ok: false, reason: lock.reason };
+    }
+
+    try {
+      const entries = await this.readFile();
+      const index = entries.findIndex((entry) => entry.id === id);
+      if (index === -1) {
+        return { ok: false, reason: `Entry not found: ${id}` };
+      }
+
+      if (entries[index]!.approvalStatus !== "pending") {
+        return { ok: false, reason: `Only pending entries can be deleted: ${id}` };
+      }
+
+      const [removed] = entries.splice(index, 1);
+      await this.writeFile(entries);
+      return { ok: true, saved: removed ? [removed] : [] };
+    } finally {
+      await lock.release?.();
+    }
+  }
+
   private lockPath(): string {
     return `${this.storagePath}.lock`;
   }

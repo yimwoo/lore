@@ -13,4 +13,5 @@ export interface SharedKnowledgeStore {
     patch: Partial<SharedKnowledgeEntry>,
   ): Promise<StoreResult>;
   remove(id: string): Promise<StoreResult>;
+  deletePending(id: string): Promise<StoreResult>;
 }

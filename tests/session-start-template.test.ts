@@ -55,6 +55,17 @@ describe("renderSessionStartTemplate", () => {
     expect(result).toBeNull();
   });
 
+  it("renders pending digest even when session entries are empty", () => {
+    const result = renderSessionStartTemplate({
+      entries: [],
+      capabilities: RECALL_ONLY,
+      pendingCount: 3,
+    });
+    expect(result).not.toBeNull();
+    expect(result).toContain("Lore has 3 pending suggestions.");
+    expect(result).toContain("lore list-shared --status pending");
+  });
+
   describe("no capabilities", () => {
     it("contains no tool names when all capabilities are false", () => {
       const result = renderSessionStartTemplate({
@@ -141,6 +152,7 @@ describe("renderSessionStartTemplate", () => {
       expect(result).toContain("### Support inline promotion");
       expect(result).toContain("### Conflict resolution");
       expect(result).toContain("## Session Knowledge");
+      expect(result).not.toContain("## Pending Suggestions");
       expect(result).toContain("## Whisper Format Reference");
       expect(result).toContain("## Behavior Summary Table");
       expect(result).toContain("## Configuration Notes");
@@ -345,5 +357,16 @@ describe("renderSessionStartTemplate", () => {
       expect(prefIdx).toBeGreaterThan(ruleIdx);
       expect(decIdx).toBeGreaterThan(prefIdx);
     });
+  });
+
+  it("places pending digest after session knowledge", () => {
+    const result = renderSessionStartTemplate({
+      entries: [makeSelectedEntry()],
+      capabilities: RECALL_ONLY,
+      pendingCount: 2,
+    })!;
+    expect(result.indexOf("## Session Knowledge")).toBeLessThan(
+      result.indexOf("## Pending Suggestions"),
+    );
   });
 });

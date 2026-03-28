@@ -34,8 +34,11 @@ export type LoreConfig = {
   sharedStoragePath: string;
   approvalLedgerPath: string;
   observationDir: string;
+  draftDir: string;
+  consolidationStatePath: string;
   projectMemoryDir: string;
   whisperStateDir: string;
+  consolidationTimeoutMs: number;
   sessionStart: SessionStartConfig;
   whisper: WhisperConfig;
   promotionPolicy: Record<SharedKnowledgeKind, PromotionCriteria>;
@@ -71,6 +74,8 @@ const defaultSessionStartConfig: SessionStartConfig = {
   weights: defaultWeights,
   perKindCaps: { ...defaultPerKindCaps },
 };
+
+const DEFAULT_CONSOLIDATION_TIMEOUT_MS = 3000;
 
 const FILE_PATH_PATTERN = /^\//;
 const FILE_EXTENSION_PATTERN = /\.(ts|js|json|yaml)$/i;
@@ -137,10 +142,16 @@ export const resolveConfig = (
       overrides?.approvalLedgerPath ?? join(baseDir, "approval-ledger.json"),
     observationDir:
       overrides?.observationDir ?? join(baseDir, "observations"),
+    draftDir:
+      overrides?.draftDir ?? join(baseDir, "drafts"),
+    consolidationStatePath:
+      overrides?.consolidationStatePath ?? join(baseDir, "consolidation-state.json"),
     projectMemoryDir:
       overrides?.projectMemoryDir ?? join(baseDir, "projects"),
     whisperStateDir:
       overrides?.whisperStateDir ?? join(baseDir, "whisper-sessions"),
+    consolidationTimeoutMs:
+      overrides?.consolidationTimeoutMs ?? DEFAULT_CONSOLIDATION_TIMEOUT_MS,
     sessionStart: overrides?.sessionStart ?? { ...defaultSessionStartConfig },
     whisper: overrides?.whisper ?? { ...defaultWhisperConfig },
     promotionPolicy: overrides?.promotionPolicy ?? defaultPromotionPolicy,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { applyStopUpdate } from "../src/plugin/stop-observer";
+import type { ExtractionProvider } from "../src/extraction/extraction-provider";
+import { applyStopUpdate, buildTurnArtifact, runStopObserver } from "../src/plugin/stop-observer";
 import type { WhisperSessionState } from "../src/shared/types";
 import { resolveConfig } from "../src/config";
 
@@ -94,5 +95,158 @@ describe("applyStopUpdate", () => {
   it("handles empty tool_calls array", () => {
     const updated = applyStopUpdate(makeState(), { tool_calls: [] });
     expect(updated.recentToolNames).toEqual(["Read"]);
+  });
+});
+
+describe("buildTurnArtifact", () => {
+  it("builds a turn artifact from stop-hook input and updated state", () => {
+    const artifact = buildTurnArtifact(
+      makeState({
+        turnIndex: 4,
+        recentToolNames: ["Read", "Edit"],
+      }),
+      {
+        session_id: "session-1",
+        cwd: "/tmp/workspaces/billing-service",
+        prompt: "Please use snake_case.",
+        assistant_response: "I will update the migration.",
+        tool_calls: [{ tool_name: "Edit", file_path: "src/db/migrate.ts" }],
+        files_modified: ["src/db/migrate.ts"],
+        files_read: ["src/plugin/stop-observer.ts"],
+      },
+      "/tmp/workspaces/billing-service",
+      "2026-03-28T20:00:00.000Z",
+    );
+
+    expect(artifact).toEqual({
+      sessionId: "session-1",
+      projectId: "billing-service",
+      turnIndex: 4,
+      turnTimestamp: "2026-03-28T20:00:00.000Z",
+      userPrompt: "Please use snake_case.",
+      assistantResponse: "I will update the migration.",
+      toolSummaries: ["Edit src/db/migrate.ts"],
+      files: ["src/db/migrate.ts", "src/plugin/stop-observer.ts"],
+      recentToolNames: ["Read", "Edit"],
+    });
+  });
+});
+
+describe("runStopObserver extraction path", () => {
+  it("invokes an injected extraction provider and draft writer", async () => {
+    const written: string[] = [];
+    const providerCalls: string[] = [];
+    const provider: ExtractionProvider = {
+      extractCandidates: async (turn) => {
+        providerCalls.push(turn.projectId);
+        return [
+          {
+            id: "draft-1",
+            kind: "domain_rule",
+            title: "Use snake_case",
+            content: "All database columns use snake_case naming.",
+            confidence: 0.83,
+            evidenceNote: "Observed after an explicit correction.",
+            sessionId: turn.sessionId,
+            projectId: turn.projectId,
+            turnIndex: turn.turnIndex,
+            timestamp: turn.turnTimestamp,
+            tags: ["database"],
+          },
+        ];
+      },
+    };
+
+    await runStopObserver(
+      JSON.stringify({
+        session_id: "session-1",
+        cwd: "/tmp/workspaces/billing-service",
+        prompt: "Please use snake_case.",
+      }),
+      {
+        config: resolveConfig(),
+        provider,
+        draftWriter: {
+          append: async (entry) => {
+            written.push(entry.id);
+          },
+        },
+        readState: async () => makeState(),
+        writeState: async () => undefined,
+        now: () => "2026-03-28T20:00:00.000Z",
+      },
+    );
+
+    expect(providerCalls).toEqual(["billing-service"]);
+    expect(written).toEqual(["draft-1"]);
+  });
+
+  it("swallows extraction failures after writing whisper state", async () => {
+    let writes = 0;
+    const provider: ExtractionProvider = {
+      extractCandidates: async () => {
+        throw new Error("provider unavailable");
+      },
+    };
+
+    await expect(
+      runStopObserver(
+        JSON.stringify({
+          session_id: "session-1",
+          cwd: "/tmp/workspaces/billing-service",
+        }),
+        {
+          config: resolveConfig(),
+          provider,
+          readState: async () => makeState(),
+          writeState: async () => {
+            writes += 1;
+          },
+        },
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(writes).toBe(1);
+  });
+
+  it("swallows draft-writer failures after extraction", async () => {
+    const provider: ExtractionProvider = {
+      extractCandidates: async () => [
+        {
+          id: "draft-1",
+          kind: "domain_rule",
+          title: "Use snake_case",
+          content: "All database columns use snake_case naming.",
+          confidence: 0.83,
+          evidenceNote: "Observed after an explicit correction.",
+          sessionId: "session-1",
+          projectId: "billing-service",
+          turnIndex: 4,
+          timestamp: "2026-03-28T20:00:00.000Z",
+          tags: ["database"],
+        },
+      ],
+    };
+
+    await expect(
+      runStopObserver(
+        JSON.stringify({
+          session_id: "session-1",
+          cwd: "/tmp/workspaces/billing-service",
+        }),
+        {
+          config: resolveConfig(),
+          provider,
+          draftWriter: {
+            append: async () => {
+              throw new Error("disk full");
+            },
+          },
+          readState: async () => makeState(),
+          writeState: async () => undefined,
+          now: () => "2026-03-28T20:00:00.000Z",
+        },
+      ),
+    ).resolves.toBeUndefined();
   });
 });

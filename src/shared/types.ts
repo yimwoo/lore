@@ -122,6 +122,9 @@ export type SharedKnowledgeEntry = {
   content: string;
   confidence: number;
   tags: string[];
+  evidenceSummary?: string;
+  contradictionCount?: number;
+  sourceTurnCount?: number;
 
   sourceProjectIds: string[];
   sourceMemoryIds: string[];
@@ -168,6 +171,7 @@ export type ContextBuilderResult = {
 export type SessionStartTemplateInput = {
   entries: SelectedEntry[];
   capabilities: LoreCapabilities;
+  pendingCount?: number;
 };
 
 export type SharedKnowledgeFilter = {
@@ -185,7 +189,7 @@ export type StoreResult = {
   reason?: string;
 };
 
-export const ledgerActions = ["promote", "approve", "reject", "demote"] as const;
+export const ledgerActions = ["promote", "approve", "reject", "demote", "merge"] as const;
 
 export type LedgerAction = (typeof ledgerActions)[number];
 
@@ -196,6 +200,7 @@ export type ApprovalLedgerEntry = {
   actor: "user" | "system";
   actionSource?: PromotionSource;
   reason?: string;
+  metadata?: Record<string, string | string[]>;
   timestamp: string;
 };
 
@@ -206,6 +211,27 @@ export type ObservationEntry = {
   kind: MemoryKind;
   confidence: number;
   timestamp: string;
+};
+
+export type DraftCandidate = {
+  id: string;
+  kind: SharedKnowledgeKind;
+  title: string;
+  content: string;
+  confidence: number;
+  evidenceNote: string;
+  sessionId: string;
+  projectId: string;
+  turnIndex: number;
+  timestamp: string;
+  tags: string[];
+};
+
+export type ConsolidationState = {
+  lastConsolidatedAt?: string;
+  lastAttemptedAt?: string;
+  lastStatus?: "ok" | "error";
+  lastError?: string;
 };
 
 export type InjectionScoreWeights = {

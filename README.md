@@ -83,11 +83,7 @@ Most users never write a single command. Here's what happens after you install:
 
 **Session 3+:** Lore starts whispering. Before each prompt, it injects the most relevant context — rules, decisions, preferences — your agent picks up automatically.
 
-**Over time:** When Lore spots a repeating pattern, it surfaces a *suggestion*. You approve it with a word:
-
-```
-You: "approve that rule"
-```
+**Over time:** Lore drafts pending knowledge from recent turns, merges repeated patterns at session start, and surfaces what needs review in a lightweight SessionStart digest.
 
 Approved knowledge becomes permanent — shared across every future project, forever.
 
@@ -148,7 +144,7 @@ Lore **never** adds shared knowledge automatically. Every entry requires your ex
 
 | Path | How it works |
 |---|---|
-| **Inline approval** | Lore surfaces a suggestion mid-session — you say `approve` and it's done |
+| **SessionStart digest** | Lore tells you when pending suggestions exist and points you to `lore list-shared --status pending` |
 | **Inline correction** | Tell your agent "that rule is outdated" — it demotes the entry on the spot |
 | **CLI promotion** | Power users can promote knowledge directly via CLI (no approval step needed) |
 | **Demotion** | Soft-delete with full audit trail — nothing is ever hard-deleted |
@@ -174,7 +170,7 @@ Bundled with the plugin install — no separate MCP configuration needed.
 
 ## Managing Knowledge (Power Users)
 
-Most users let Lore learn on its own and approve suggestions as they come up. If you want to seed Lore immediately — with your team's standards, onboarding rules, or existing documentation — the CLI gives you direct control.
+Most users let Lore learn on its own and review pending suggestions when SessionStart flags them. If you want to seed Lore immediately — with your team's standards, onboarding rules, or existing documentation — the CLI gives you direct control.
 
 ### Promote a rule
 
@@ -247,9 +243,9 @@ Restart Codex after installing.
 
 | Hook | Purpose |
 |---|---|
-| `SessionStart` | Injects shared knowledge, initializes whisper state |
+| `SessionStart` | Runs bounded consolidation, injects shared knowledge, initializes whisper state |
 | `UserPromptSubmit` | Whispers relevant shared knowledge before each prompt |
-| `Stop` (async) | Updates session context after each turn |
+| `Stop` (async) | Updates session context and drafts candidate knowledge after each turn |
 
 Hooks are auto-discovered from `.codex/hooks.json` in your repo. For global use, copy to `~/.codex/hooks.json`.
 
@@ -262,6 +258,8 @@ All data lives locally on your machine:
   shared.json              Shared knowledge entries
   approval-ledger.json     Append-only audit trail
   observations/            Per-session observation logs
+  drafts/                  Per-session extracted draft candidates
+  consolidation-state.json SessionStart consolidation watermark
   whisper-sessions/        Per-session whisper state
 ```
 
@@ -278,7 +276,7 @@ bash ~/.codex/plugins/lore-source/install.sh
 ## Development
 
 ```bash
-npm test            # 318 tests
+npm test            # 339 tests
 npm run test:watch  # watch mode
 npm run typecheck   # tsc --noEmit
 npm run demo        # simulated session
@@ -290,11 +288,11 @@ npm run demo        # simulated session
 src/
   core/               Memory store, hint engine, daemon
   plugin/             SessionStart, instruction template, whisper, stop observer
-  promotion/          Promote, demote, approve, suggestion engine
+  promotion/          Promote, demote, approve, draft store, consolidator
   mcp/                MCP recall tool handlers
   shared/             Types and validators
   ui/                 React sidecar component (experimental)
-tests/                26 test files, 317 tests
+tests/                Vitest coverage for core, plugin, CLI, and promotion flows
 ```
 
 ---

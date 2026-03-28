@@ -11,7 +11,6 @@ import { FileSharedStore } from "./core/file-shared-store";
 import { FileApprovalStore } from "./promotion/approval-store";
 import { Promoter } from "./promotion/promoter";
 import { ObservationLogReader } from "./promotion/observation-log";
-import { SuggestionEngine } from "./promotion/suggestion-engine";
 import { contentHash } from "./shared/validators";
 import { resolveConfig } from "./config";
 import type { LoreSnapshot } from "./core/daemon";
@@ -39,7 +38,7 @@ Commands:
   demote <id>                    Soft-delete a shared knowledge entry
   approve <id>                   Approve a pending suggestion
   reject <id>                    Reject a pending suggestion
-  suggest                        Run suggestion engine on observation log
+  suggest                        Show observation/debug info for the retired suggestion path
   help                           Show this help message
 
 Options:
@@ -478,64 +477,20 @@ const runSuggest = async (
   options: Record<string, string | boolean>,
   streams: CliStreams,
 ) => {
-  const { sharedStore, approvalStore, config } = createPromoter(options);
+  const { config } = createPromoter(options);
 
   const reader = new ObservationLogReader({
     observationDir: config.observationDir,
   });
-
-  const engine = new SuggestionEngine({
-    reader,
-    sharedStore,
-    policy: config.promotionPolicy,
-  });
-
-  const candidates = await engine.findCandidates();
-
-  if (candidates.length === 0) {
-    await writeOutput(streams.stdout, "No suggestion candidates found.");
-    return;
-  }
-
-  let saved = 0;
-  for (const candidate of candidates) {
-    const timestamp = new Date().toISOString();
-    const id = `sk-suggest-${Math.random().toString(36).slice(2, 10)}`;
-
-    const entry = {
-      id,
-      kind: candidate.kind,
-      title: `[Suggested] ${candidate.kind}`,
-      content: `Observed across ${candidate.sessionCount} sessions, ${candidate.projectCount} projects`,
-      confidence: candidate.confidence,
-      tags: [],
-      sourceProjectIds: candidate.sampleProjectIds,
-      sourceMemoryIds: [],
-      promotionSource: "suggested" as const,
-      createdBy: "system" as const,
-      approvalStatus: "pending" as const,
-      sessionCount: candidate.sessionCount,
-      projectCount: candidate.projectCount,
-      lastSeenAt: candidate.lastSeenAt,
-      contentHash: candidate.contentHash,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-
-    await sharedStore.save(entry);
-    await approvalStore.append({
-      knowledgeEntryId: id,
-      action: "promote",
-      actor: "system",
-      actionSource: "suggested",
-    });
-    saved += 1;
-  }
+  const observations = await reader.readAll();
 
   const output =
     options.json === true
-      ? JSON.stringify({ candidates: saved })
-      : `Created ${saved} suggestion candidate(s). Review with: lore list-shared --status pending`;
+      ? JSON.stringify({
+          retired: true,
+          observations: observations.length,
+        })
+      : `SuggestionEngine is retired. Pending entries are now created by SessionStart consolidation. Observation log currently has ${observations.length} entr${observations.length === 1 ? "y" : "ies"}.`;
   await writeOutput(streams.stdout, output);
 };
 

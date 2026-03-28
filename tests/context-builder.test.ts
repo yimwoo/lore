@@ -68,6 +68,7 @@ const makeStore = (entries: SharedKnowledgeEntry[]): SharedKnowledgeStore => ({
   save: async () => ({ ok: true }),
   update: async () => ({ ok: true }),
   remove: async () => ({ ok: true }),
+  deletePending: async () => ({ ok: true }),
 });
 
 const titles = (entries: SelectedEntry[]): string[] =>

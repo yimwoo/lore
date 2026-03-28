@@ -189,6 +189,17 @@ const renderSessionKnowledge = (entries: SelectedEntry[]): string => {
   return lines.join("\n").trimEnd();
 };
 
+const renderPendingDigest = (pendingCount: number): string => {
+  if (pendingCount <= 0) {
+    return "";
+  }
+
+  return `## Pending Suggestions
+
+Lore has ${pendingCount} pending suggestion${pendingCount === 1 ? "" : "s"}.
+-> \`lore list-shared --status pending\``;
+};
+
 const renderWhisperReference = (): string =>
   `## Whisper Format Reference
 
@@ -294,9 +305,9 @@ These are UX-level tuning decisions that should be reviewed after real-world usa
 export const renderSessionStartTemplate = (
   input: SessionStartTemplateInput,
 ): string | null => {
-  const { entries, capabilities } = input;
+  const { entries, capabilities, pendingCount = 0 } = input;
 
-  if (entries.length === 0) return null;
+  if (entries.length === 0 && pendingCount === 0) return null;
 
   const sections = [
     renderLoreIntro(capabilities),
@@ -305,7 +316,8 @@ export const renderSessionStartTemplate = (
     renderCorrectionSection(capabilities),
     renderPromotionSection(capabilities),
     renderConflictSection(capabilities),
-    renderSessionKnowledge(entries),
+    entries.length > 0 ? renderSessionKnowledge(entries) : "",
+    renderPendingDigest(pendingCount),
     renderWhisperReference(),
     renderBehaviorTable(capabilities),
     renderConfigurationNotes(),

@@ -86,7 +86,7 @@ const createPendingEntry = async (id: string) => {
 };
 
 describe("CLI suggest command", () => {
-  it("creates pending entries from observation log", async () => {
+  it("reports retired status without creating pending entries", async () => {
     await seedObservations("Validate all inputs", 3, 1);
 
     const streams = createStreams();
@@ -96,18 +96,18 @@ describe("CLI suggest command", () => {
     );
 
     expect(code).toBe(0);
-    expect(streams.getStdout()).toContain("suggestion candidate");
+    expect(streams.getStdout()).toContain("SuggestionEngine is retired");
 
-    // Verify pending entries were created
+    // Verify no pending entries were created by the retired path
     const streams2 = createStreams();
     await runCli(
       ["list-shared", "--status", "pending", "--shared-dir", testDir],
       streams2,
     );
-    expect(streams2.getStdout()).toContain("Suggested");
+    expect(streams2.getStdout()).toContain("No shared knowledge entries found.");
   });
 
-  it("reports no candidates when observation log is empty", async () => {
+  it("reports observation count when the log is empty", async () => {
     const streams = createStreams();
     const code = await runCli(
       ["suggest", "--shared-dir", testDir],
@@ -115,7 +115,7 @@ describe("CLI suggest command", () => {
     );
 
     expect(code).toBe(0);
-    expect(streams.getStdout()).toContain("No suggestion candidates");
+    expect(streams.getStdout()).toContain("Observation log currently has 0 entries");
   });
 });
 

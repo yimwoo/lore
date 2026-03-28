@@ -117,6 +117,32 @@ describe("FileSharedStore", () => {
     expect(entry!.demotedAt).toBeTruthy();
   });
 
+  it("deletePending removes pending entries without demoting them", async () => {
+    const store = makeStore();
+    await store.save(
+      makeEntry({
+        approvalStatus: "pending",
+        promotionSource: "suggested",
+        createdBy: "system",
+      }),
+    );
+
+    const result = await store.deletePending("sk-0001");
+    expect(result.ok).toBe(true);
+
+    const entry = await store.getById("sk-0001");
+    expect(entry).toBeNull();
+  });
+
+  it("deletePending rejects non-pending entries", async () => {
+    const store = makeStore();
+    await store.save(makeEntry());
+
+    const result = await store.deletePending("sk-0001");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("Only pending entries");
+  });
+
   it("demoted entries excluded from default list", async () => {
     const store = makeStore();
     await store.save(makeEntry());

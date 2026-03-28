@@ -6,37 +6,6 @@ Lore watches your sessions, learns your patterns, and whispers the right context
 
 ---
 
-## Table of Contents
-
-- [Lore — Cross-Project Memory for Codex](#lore--cross-project-memory-for-codex)
-  - [Table of Contents](#table-of-contents)
-  - [Quick Start](#quick-start)
-  - [What Lore Does](#what-lore-does)
-  - [How Lore Learns](#how-lore-learns)
-  - [How It Works](#how-it-works)
-  - [Real-World Examples](#real-world-examples)
-  - [Shared Knowledge Kinds](#shared-knowledge-kinds)
-  - [You Control Everything](#you-control-everything)
-  - [MCP Recall Tools](#mcp-recall-tools)
-  - [Managing Knowledge (Power Users)](#managing-knowledge-power-users)
-    - [Promote a rule](#promote-a-rule)
-    - [See what Lore knows](#see-what-lore-knows)
-    - [Remove outdated knowledge](#remove-outdated-knowledge)
-  - [Installation](#installation)
-    - [For Contributors](#for-contributors)
-    - [Manual Installation](#manual-installation)
-    - [Hooks](#hooks)
-    - [Storage](#storage)
-    - [Updating](#updating)
-  - [Development](#development)
-    - [Project Structure](#project-structure)
-  - [Design](#design)
-  - [Uninstalling](#uninstalling)
-  - [Contributing](#contributing)
-  - [License](#license)
-
----
-
 ## Quick Start
 
 ```bash

@@ -8,9 +8,9 @@ Lore is a Codex plugin providing shared cross-project knowledge. It has two memo
 
 ## Before You Start
 
-1. Run `npm test` to confirm baseline — all 277 tests should pass.
+1. Run `npm test` to confirm baseline — all tests should pass.
 2. Run `npm run typecheck` to confirm no type errors.
-3. Read the design doc at `docs/plans/2026-03-27-lore-plugin-design.md` if you need architectural context.
+3. Read `docs/design.md` if you need architectural context.
 
 ## Rules
 
@@ -34,6 +34,7 @@ Lore is a Codex plugin providing shared cross-project knowledge. It has two memo
 - Do not modify the approval ledger format — it is append-only and used for crash recovery.
 - Do not add I/O calls to `whisper-scorer.ts` — it must remain a pure scoring module.
 - Do not record whisper decisions in the Stop hook — the UserPromptSubmit hook owns whisper state writes.
+- Do not add I/O calls to `session-start-template.ts` — it must remain a pure rendering module. Capabilities are passed in, not resolved internally.
 
 ## TypeScript Style
 
@@ -58,7 +59,8 @@ src/core/shared-store.ts      SharedKnowledgeStore interface
 src/core/file-shared-store.ts JSON file implementation (lock + atomic write)
 src/core/hint-engine.ts       Hint generation (project + shared knowledge aware)
 src/core/daemon.ts            Core daemon orchestration
-src/plugin/context-builder.ts SessionStart scoring (5 dimensions) + injection
+src/plugin/context-builder.ts SessionStart scoring (5 dimensions), returns data
+src/plugin/session-start-template.ts Capability-aware instruction template (pure, no I/O)
 src/plugin/session-start.ts   SessionStart hook entrypoint
 src/plugin/pre-prompt-whisper.ts UserPromptSubmit hook (adaptive whisper)
 src/plugin/stop-observer.ts   Stop hook (session context update, async)
@@ -97,4 +99,13 @@ No transitions from `rejected` or `demoted`. Re-promoting creates a new entry.
 - Pattern: real stores in temp dirs, not mocks
 - Run all: `npm test`
 - Run one: `npx vitest run tests/<file>.test.ts`
-- 23 test files, 277 tests total
+- 25 test files, 309 tests total
+
+## Release Checklist
+
+When bumping the version, update **all** of these files:
+
+- `package.json` — `"version"` field
+- `.codex-plugin/plugin.json` — `"version"` field
+- `package-lock.json` — run `npm install --package-lock-only` to sync
+- `CHANGELOG.md` — add a new version section

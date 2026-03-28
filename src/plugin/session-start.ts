@@ -3,7 +3,9 @@ import { createInterface } from "node:readline";
 import { FileSharedStore } from "../core/file-shared-store";
 import { FileMemoryStore } from "../core/memory-store";
 import { resolveConfig } from "../config";
-import { buildSessionStartContextFull } from "./context-builder";
+import { buildSessionStartContext } from "./context-builder";
+import { renderSessionStartTemplate } from "./session-start-template";
+import type { LoreCapabilities } from "../shared/types";
 import { deriveSessionKey, initWhisperState } from "./whisper-state";
 import type { MemoryEntry } from "../shared/types";
 
@@ -85,7 +87,7 @@ export const runSessionStart = async (
   }
 
   try {
-    const result = await buildSessionStartContextFull({
+    const result = await buildSessionStartContext({
       store: sharedStore,
       currentProjectId,
       currentTags,
@@ -107,7 +109,20 @@ export const runSessionStart = async (
       }
     }
 
-    return { additionalContext: result.context };
+    // Baseline capabilities — MCP tools not yet wired
+    const capabilities: LoreCapabilities = {
+      recall: false,
+      promote: false,
+      demote: false,
+      cliAvailable: false,
+    };
+
+    const template = renderSessionStartTemplate({
+      entries: result.selectedEntries,
+      capabilities,
+    });
+
+    return { additionalContext: template ?? "" };
   } catch {
     // On any error, return empty context rather than crashing
     return { additionalContext: "" };

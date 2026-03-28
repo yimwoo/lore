@@ -12,6 +12,7 @@ import type { SharedKnowledgeEntry, SessionStartConfig, SharedKnowledgeKind } fr
 import { defaultPerKindCaps } from "../src/shared/types";
 import type { SharedKnowledgeStore } from "../src/core/shared-store";
 import { contentHash } from "../src/shared/validators";
+import type { SelectedEntry } from "../src/shared/types";
 
 const defaultConfig: SessionStartConfig = {
   maxItems: 10,
@@ -68,6 +69,9 @@ const makeStore = (entries: SharedKnowledgeEntry[]): SharedKnowledgeStore => ({
   update: async () => ({ ok: true }),
   remove: async () => ({ ok: true }),
 });
+
+const titles = (entries: SelectedEntry[]): string[] =>
+  entries.map((e) => e.title);
 
 describe("clamp01", () => {
   it("clamps below 0", () => expect(clamp01(-0.5)).toBe(0));
@@ -165,7 +169,7 @@ describe("relevanceScore", () => {
 });
 
 describe("buildSessionStartContext", () => {
-  it("returns empty string for empty store", async () => {
+  it("returns empty result for empty store", async () => {
     const result = await buildSessionStartContext({
       store: makeStore([]),
       currentProjectId: "proj-1",
@@ -173,7 +177,8 @@ describe("buildSessionStartContext", () => {
       config: defaultConfig,
       now: () => NOW,
     });
-    expect(result).toBe("");
+    expect(result.selectedEntries).toHaveLength(0);
+    expect(result.injectedContentHashes).toHaveLength(0);
   });
 
   it("excludes entries below confidence threshold", async () => {
@@ -186,7 +191,7 @@ describe("buildSessionStartContext", () => {
       config: defaultConfig,
       now: () => NOW,
     });
-    expect(result).toBe("");
+    expect(result.selectedEntries).toHaveLength(0);
   });
 
   it("enforces per-kind caps", async () => {
@@ -207,10 +212,8 @@ describe("buildSessionStartContext", () => {
       now: () => NOW,
     });
 
-    const ruleLines = result
-      .split("\n")
-      .filter((l) => l.startsWith("- **Rule"));
-    expect(ruleLines.length).toBeLessThanOrEqual(4);
+    const ruleEntries = result.selectedEntries.filter((e) => e.kind === "domain_rule");
+    expect(ruleEntries.length).toBeLessThanOrEqual(4);
   });
 
   it("enforces total item cap", async () => {
@@ -232,10 +235,7 @@ describe("buildSessionStartContext", () => {
       now: () => NOW,
     });
 
-    const bulletLines = result
-      .split("\n")
-      .filter((l) => l.startsWith("- **"));
-    expect(bulletLines.length).toBeLessThanOrEqual(5);
+    expect(result.selectedEntries.length).toBeLessThanOrEqual(5);
   });
 
   it("enforces token budget", async () => {
@@ -255,10 +255,7 @@ describe("buildSessionStartContext", () => {
       now: () => NOW,
     });
 
-    const bulletLines = result
-      .split("\n")
-      .filter((l) => l.startsWith("- **"));
-    expect(bulletLines.length).toBeLessThan(5);
+    expect(result.selectedEntries.length).toBeLessThan(5);
   });
 
   it("ranks workspace-relevant entries higher than globally stable but irrelevant", async () => {
@@ -292,10 +289,8 @@ describe("buildSessionStartContext", () => {
       now: () => NOW,
     });
 
-    const lines = result.split("\n").filter((l) => l.startsWith("- **"));
-    expect(lines.length).toBe(2);
-    // Relevant entry should appear first (under Domain Rules, which comes first)
-    expect(lines[0]).toContain("Relevant rule");
+    expect(result.selectedEntries).toHaveLength(2);
+    expect(result.selectedEntries[0]!.title).toBe("Relevant rule");
   });
 
   it("degrades gracefully with empty currentTags", async () => {
@@ -309,10 +304,10 @@ describe("buildSessionStartContext", () => {
       now: () => NOW,
     });
 
-    expect(result).toContain("Test rule");
+    expect(titles(result.selectedEntries)).toContain("Test rule");
   });
 
-  it("groups output by kind and skips empty sections", async () => {
+  it("returns entries with correct kinds", async () => {
     const result = await buildSessionStartContext({
       store: makeStore([
         makeEntry({ kind: "domain_rule", title: "Rule A", content: "Rule A content", contentHash: contentHash("Rule A content") }),
@@ -324,11 +319,9 @@ describe("buildSessionStartContext", () => {
       now: () => NOW,
     });
 
-    expect(result).toContain("## Domain Rules");
-    expect(result).toContain("## Architecture");
-    expect(result).not.toContain("## Glossary");
-    expect(result).not.toContain("## Preferences");
-    expect(result).not.toContain("## Decisions");
+    const kinds = result.selectedEntries.map((e) => e.kind);
+    expect(kinds).toContain("domain_rule");
+    expect(kinds).toContain("architecture_fact");
   });
 
   it("deduplicates by contentHash", async () => {
@@ -343,14 +336,10 @@ describe("buildSessionStartContext", () => {
       now: () => NOW,
     });
 
-    const bulletLines = result
-      .split("\n")
-      .filter((l) => l.startsWith("- **"));
-    expect(bulletLines).toHaveLength(1);
+    expect(result.selectedEntries).toHaveLength(1);
   });
 
   it("diversity pass prefers underrepresented kinds", async () => {
-    // 4 domain_rules (will hit cap) + 1 glossary
     const entries = [
       ...Array.from({ length: 4 }, (_, i) =>
         makeEntry({
@@ -382,6 +371,51 @@ describe("buildSessionStartContext", () => {
       now: () => NOW,
     });
 
-    expect(result).toContain("Glossary entry");
+    expect(titles(result.selectedEntries)).toContain("Glossary entry");
+  });
+
+  it("returns SelectedEntry objects with correct fields", async () => {
+    const result = await buildSessionStartContext({
+      store: makeStore([
+        makeEntry({
+          id: "sk-test",
+          title: "Rule A",
+          content: "Rule A content",
+          contentHash: contentHash("Rule A content"),
+          kind: "domain_rule",
+        }),
+      ]),
+      currentProjectId: "proj-1",
+      currentTags: [],
+      config: defaultConfig,
+      now: () => NOW,
+    });
+
+    expect(result.selectedEntries).toHaveLength(1);
+    const entry = result.selectedEntries[0]!;
+    expect(entry.id).toBe("sk-test");
+    expect(entry.kind).toBe("domain_rule");
+    expect(entry.title).toBe("Rule A");
+    expect(entry.content).toBe("Rule A content");
+    expect(entry.contentHash).toBe(contentHash("Rule A content"));
+  });
+
+  it("populates injectedContentHashes correctly", async () => {
+    const hash1 = contentHash("Content 1");
+    const hash2 = contentHash("Content 2");
+
+    const result = await buildSessionStartContext({
+      store: makeStore([
+        makeEntry({ content: "Content 1", contentHash: hash1 }),
+        makeEntry({ content: "Content 2", contentHash: hash2 }),
+      ]),
+      currentProjectId: "proj-1",
+      currentTags: [],
+      config: defaultConfig,
+      now: () => NOW,
+    });
+
+    expect(result.injectedContentHashes).toContain(hash1);
+    expect(result.injectedContentHashes).toContain(hash2);
   });
 });

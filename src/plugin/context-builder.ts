@@ -1,4 +1,6 @@
 import type {
+  ContextBuilderResult,
+  SelectedEntry,
   SessionStartConfig,
   SharedKnowledgeEntry,
   SharedKnowledgeKind,
@@ -81,30 +83,17 @@ export const injectionScore = (
 const estimateTokens = (entry: SharedKnowledgeEntry): number =>
   Math.ceil((entry.title.length + entry.content.length) / 4);
 
-const kindSectionHeaders: Record<SharedKnowledgeKind, string> = {
-  domain_rule: "Domain Rules",
-  glossary_term: "Glossary",
-  architecture_fact: "Architecture",
-  user_preference: "Preferences",
-  decision_record: "Decisions",
-};
+const toSelectedEntry = (entry: SharedKnowledgeEntry): SelectedEntry => ({
+  id: entry.id,
+  kind: entry.kind,
+  title: entry.title,
+  content: entry.content,
+  contentHash: entry.contentHash,
+});
 
-const KIND_ORDER: SharedKnowledgeKind[] = [
-  "domain_rule",
-  "glossary_term",
-  "architecture_fact",
-  "user_preference",
-  "decision_record",
-];
-
-export type BuildContextResult = {
-  context: string;
-  injectedContentHashes: string[];
-};
-
-export const buildSessionStartContextFull = async (
+export const buildSessionStartContext = async (
   options: BuildContextOptions,
-): Promise<BuildContextResult> => {
+): Promise<ContextBuilderResult> => {
   const { store, currentProjectId, currentTags, config } = options;
   const now = new Date(options.now?.() ?? new Date().toISOString());
 
@@ -120,7 +109,7 @@ export const buildSessionStartContextFull = async (
   );
 
   if (gated.length === 0) {
-    return { context: "", injectedContentHashes: [] };
+    return { selectedEntries: [], injectedContentHashes: [] };
   }
 
   // 3. Score
@@ -189,39 +178,11 @@ export const buildSessionStartContextFull = async (
   }
 
   if (selected.length === 0) {
-    return { context: "", injectedContentHashes: [] };
-  }
-
-  // 8. Format grouped by kind
-  const grouped = new Map<SharedKnowledgeKind, SharedKnowledgeEntry[]>();
-  for (const entry of selected) {
-    const list = grouped.get(entry.kind) ?? [];
-    list.push(entry);
-    grouped.set(entry.kind, list);
-  }
-
-  const lines: string[] = ["# Lore: Shared Knowledge", ""];
-
-  for (const kind of KIND_ORDER) {
-    const entries = grouped.get(kind);
-    if (!entries || entries.length === 0) continue;
-
-    lines.push(`## ${kindSectionHeaders[kind]}`);
-    for (const entry of entries) {
-      lines.push(`- **${entry.title}**: ${entry.content}`);
-    }
-    lines.push("");
+    return { selectedEntries: [], injectedContentHashes: [] };
   }
 
   return {
-    context: lines.join("\n").trim(),
+    selectedEntries: selected.map(toSelectedEntry),
     injectedContentHashes: selected.map((e) => e.contentHash),
   };
-};
-
-export const buildSessionStartContext = async (
-  options: BuildContextOptions,
-): Promise<string> => {
-  const result = await buildSessionStartContextFull(options);
-  return result.context;
 };

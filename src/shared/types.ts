@@ -143,6 +143,33 @@ export type SharedKnowledgeEntry = {
   updatedAt: string;
 };
 
+// --- Capability & Template Types (SessionStart Template) ---
+
+export type LoreCapabilities = {
+  recall: boolean;
+  promote: boolean;
+  demote: boolean;
+  cliAvailable: boolean;
+};
+
+export type SelectedEntry = {
+  id: string;
+  kind: SharedKnowledgeKind;
+  title: string;
+  content: string;
+  contentHash: string;
+};
+
+export type ContextBuilderResult = {
+  selectedEntries: SelectedEntry[];
+  injectedContentHashes: string[];
+};
+
+export type SessionStartTemplateInput = {
+  entries: SelectedEntry[];
+  capabilities: LoreCapabilities;
+};
+
 export type SharedKnowledgeFilter = {
   kind?: SharedKnowledgeKind;
   approvalStatus?: ApprovalStatus;

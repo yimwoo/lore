@@ -11,7 +11,6 @@ This document covers how Lore works under the hood — the architecture, memory 
 - [Promotion Workflow](#promotion-workflow)
 - [Shared Knowledge Kinds](#shared-knowledge-kinds)
 - [Storage](#storage)
-- [Detailed Design Documents](#detailed-design-documents)
 
 ## Architecture
 
@@ -24,7 +23,7 @@ Lore is structured as four layers with strict separation:
 | Layer | Directory | Responsibility |
 | --- | --- | --- |
 | **Core library** | `src/core/`, `src/bridge/`, `src/shared/` | Reusable engine — memory store, hint engine, daemon, types. No plugin runtime assumptions. |
-| **Plugin integration** | `src/plugin/` | SessionStart injection, pre-prompt whisper, stop observer, context building, whisper scoring. Plugin-facing only. |
+| **Plugin integration** | `src/plugin/` | SessionStart injection, capability-aware instruction template, pre-prompt whisper, stop observer, context building, whisper scoring. Plugin-facing only. |
 | **Promotion** | `src/promotion/` | Promoter, policy, approval store, observation log, suggestion engine. |
 | **MCP surface** | `src/mcp/` | Thin adapter exposing domain services as MCP recall tools. |
 
@@ -169,11 +168,3 @@ All data lives locally on your machine:
 - **Soft delete only** — `remove()` sets `approvalStatus: "demoted"`. The ledger preserves the full audit trail.
 - **Per-session files** — concurrent sessions write to separate observation and whisper state files, avoiding contention.
 - **Atomic writes** — all file writes use a temp file + rename pattern with exclusive lock files for concurrent access safety.
-
-## Detailed Design Documents
-
-For deeper implementation details, see the original design documents:
-
-- [Plugin architecture](plans/2026-03-27-lore-plugin-design.md) — two-tier memory, scoring, MCP tools, promotion workflow
-- [Whisper system](plans/2026-03-27-lore-whisper-design.md) — adaptive pre-prompt injection, scoring, session state
-- [Original sidecar design](plans/2026-03-26-lore-design.md) — project-scoped memory and hinting model

@@ -249,7 +249,7 @@ The installer detects an existing checkout and updates in place. Restart Codex a
 ## Development
 
 ```bash
-npm test            # 279 tests
+npm test            # 309 tests
 npm run test:watch  # watch mode
 npm run typecheck   # tsc --noEmit
 npm run demo        # simulated session
@@ -260,23 +260,17 @@ npm run demo        # simulated session
 ```text
 src/
   core/               Memory store, hint engine, daemon
-  plugin/             SessionStart, whisper, stop observer
+  plugin/             SessionStart, instruction template, whisper, stop observer
   promotion/          Promote, demote, approve, suggestion engine
   mcp/                MCP recall tool handlers
   shared/             Types and validators
   ui/                 React sidecar component (experimental)
-tests/                24 test files, 279 tests
+tests/                25 test files, 309 tests
 ```
 
 ## Design
 
 See the [Design Overview](docs/design.md) for architecture diagrams, whisper scoring details, promotion workflow, and storage layout.
-
-Detailed design documents:
-
-- [Plugin architecture](docs/plans/2026-03-27-lore-plugin-design.md) — two-tier memory, scoring, MCP tools, promotion workflow
-- [Whisper system](docs/plans/2026-03-27-lore-whisper-design.md) — adaptive pre-prompt injection, scoring, session state
-- [Original sidecar design](docs/plans/2026-03-26-lore-design.md) — project-scoped memory and hinting model
 
 ## Uninstalling
 

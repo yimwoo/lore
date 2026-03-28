@@ -54,7 +54,7 @@ afterEach(async () => {
 describe("session-start integration", () => {
   // Rather than fighting module-level imports, test the core logic
   // by using buildSessionStartContext directly with a FileSharedStore
-  it("produces additionalContext with seeded shared knowledge", async () => {
+  it("selects entries with seeded shared knowledge", async () => {
     const { FileSharedStore } = await import("../src/core/file-shared-store");
     const { buildSessionStartContext } = await import(
       "../src/plugin/context-builder"
@@ -85,12 +85,12 @@ describe("session-start integration", () => {
       now: () => "2026-01-15T00:00:00Z",
     });
 
-    expect(result).toContain("Lore: Shared Knowledge");
-    expect(result).toContain("Use snake_case");
-    expect(result).toContain("PostgreSQL is source of truth");
+    const entryTitles = result.selectedEntries.map((e) => e.title);
+    expect(entryTitles).toContain("Use snake_case");
+    expect(entryTitles).toContain("PostgreSQL is source of truth");
   });
 
-  it("returns empty string with empty store", async () => {
+  it("returns empty result with empty store", async () => {
     const { FileSharedStore } = await import("../src/core/file-shared-store");
     const { buildSessionStartContext } = await import(
       "../src/plugin/context-builder"
@@ -108,7 +108,8 @@ describe("session-start integration", () => {
       now: () => "2026-01-15T00:00:00Z",
     });
 
-    expect(result).toBe("");
+    expect(result.selectedEntries).toHaveLength(0);
+    expect(result.injectedContentHashes).toHaveLength(0);
   });
 
   it("biases toward relevant entries when project memories exist", async () => {
@@ -148,8 +149,7 @@ describe("session-start integration", () => {
       now: () => "2026-01-15T00:00:00Z",
     });
 
-    const lines = result.split("\n").filter((l) => l.startsWith("- **"));
-    expect(lines[0]).toContain("Project-relevant rule");
+    expect(result.selectedEntries[0]!.title).toBe("Project-relevant rule");
   });
 
   it("degrades gracefully without project memories (empty tags)", async () => {
@@ -171,11 +171,11 @@ describe("session-start integration", () => {
       now: () => "2026-01-15T00:00:00Z",
     });
 
-    // Should not crash and should still include universal/domain_rule entries
-    expect(result).toContain("Use snake_case");
+    const entryTitles = result.selectedEntries.map((e) => e.title);
+    expect(entryTitles).toContain("Use snake_case");
   });
 
-  it("output is valid structured Markdown", async () => {
+  it("returns SelectedEntry objects with expected fields", async () => {
     const { FileSharedStore } = await import("../src/core/file-shared-store");
     const { buildSessionStartContext } = await import(
       "../src/plugin/context-builder"
@@ -194,8 +194,12 @@ describe("session-start integration", () => {
       now: () => "2026-01-15T00:00:00Z",
     });
 
-    expect(result).toMatch(/^# Lore: Shared Knowledge/);
-    expect(result).toContain("## Domain Rules");
-    expect(result).toMatch(/- \*\*.+\*\*:/);
+    expect(result.selectedEntries.length).toBeGreaterThan(0);
+    const entry = result.selectedEntries[0]!;
+    expect(entry).toHaveProperty("id");
+    expect(entry).toHaveProperty("kind");
+    expect(entry).toHaveProperty("title");
+    expect(entry).toHaveProperty("content");
+    expect(entry).toHaveProperty("contentHash");
   });
 });

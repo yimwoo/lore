@@ -1,0 +1,252 @@
+export const sessionEventKinds = [
+  "user_prompt_submitted",
+  "assistant_response_completed",
+  "tool_run_completed",
+  "tool_run_failed",
+] as const;
+
+export type SessionEventKind = (typeof sessionEventKinds)[number];
+
+export type SessionEvent = {
+  id: string;
+  projectId: string;
+  timestamp: string;
+  kind: SessionEventKind;
+  summary: string;
+  details?: string;
+  files?: string[];
+  metadata?: Record<string, string | number | boolean | null>;
+};
+
+export const memoryKinds = ["decision", "working_context", "reminder"] as const;
+
+export type MemoryKind = (typeof memoryKinds)[number];
+
+export type MemoryEntry = {
+  id: string;
+  projectId: string;
+  kind: MemoryKind;
+  content: string;
+  sourceEventIds: string[];
+  confidence: number;
+  createdAt: string;
+  updatedAt: string;
+  tags: string[];
+};
+
+export type MemoryCandidate = Omit<MemoryEntry, "id" | "createdAt" | "updatedAt">;
+
+export const hintCategories = ["recall", "risk", "focus", "next_step"] as const;
+
+export type HintCategory = (typeof hintCategories)[number];
+
+export type HintSource = "project" | "shared";
+
+export type HintBullet = {
+  category: HintCategory;
+  text: string;
+  confidence: number;
+  relatedMemoryIds: string[];
+  source?: HintSource;
+};
+
+export type Hint = {
+  projectId: string;
+  bullets: HintBullet[];
+  createdAt: string;
+  promotedAt?: string;
+  sourceEventIds: string[];
+};
+
+export type SidecarActivity =
+  | {
+      type: "event_ingested";
+      eventId: string;
+      projectId: string;
+      createdAt: string;
+      message: string;
+    }
+  | {
+      type: "memory_saved";
+      memoryId: string;
+      projectId: string;
+      createdAt: string;
+      message: string;
+    }
+  | {
+      type: "hint_promoted";
+      projectId: string;
+      createdAt: string;
+      message: string;
+    };
+
+export const HINT_MAX_BULLETS = 4;
+export const DEFAULT_HINT_CONFIDENCE_THRESHOLD = 0.6;
+
+export const isSessionEventKind = (value: string): value is SessionEventKind =>
+  sessionEventKinds.includes(value as SessionEventKind);
+
+export const isMemoryKind = (value: string): value is MemoryKind =>
+  memoryKinds.includes(value as MemoryKind);
+
+export const isHintCategory = (value: string): value is HintCategory =>
+  hintCategories.includes(value as HintCategory);
+
+// --- Shared Knowledge Types (Plugin v2) ---
+
+export const sharedKnowledgeKinds = [
+  "domain_rule",
+  "architecture_fact",
+  "decision_record",
+  "user_preference",
+  "glossary_term",
+] as const;
+
+export type SharedKnowledgeKind = (typeof sharedKnowledgeKinds)[number];
+
+export const approvalStatuses = [
+  "pending",
+  "approved",
+  "rejected",
+  "demoted",
+] as const;
+
+export type ApprovalStatus = (typeof approvalStatuses)[number];
+
+export type PromotionSource = "explicit" | "suggested";
+
+export type SharedKnowledgeEntry = {
+  id: string;
+  kind: SharedKnowledgeKind;
+  title: string;
+  content: string;
+  confidence: number;
+  tags: string[];
+
+  sourceProjectIds: string[];
+  sourceMemoryIds: string[];
+  promotionSource: PromotionSource;
+  createdBy: "user" | "system";
+
+  approvalStatus: ApprovalStatus;
+  statusReason?: string;
+  approvedAt?: string;
+  rejectedAt?: string;
+  demotedAt?: string;
+
+  sessionCount: number;
+  projectCount: number;
+  lastSeenAt: string;
+  contentHash: string;
+
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SharedKnowledgeFilter = {
+  kind?: SharedKnowledgeKind;
+  approvalStatus?: ApprovalStatus;
+  minConfidence?: number;
+  tags?: string[];
+  query?: string;
+  limit?: number;
+};
+
+export type StoreResult = {
+  ok: boolean;
+  saved?: SharedKnowledgeEntry[];
+  reason?: string;
+};
+
+export const ledgerActions = ["promote", "approve", "reject", "demote"] as const;
+
+export type LedgerAction = (typeof ledgerActions)[number];
+
+export type ApprovalLedgerEntry = {
+  id: string;
+  knowledgeEntryId: string;
+  action: LedgerAction;
+  actor: "user" | "system";
+  actionSource?: PromotionSource;
+  reason?: string;
+  timestamp: string;
+};
+
+export type ObservationEntry = {
+  sessionId: string;
+  projectId: string;
+  contentHash: string;
+  kind: MemoryKind;
+  confidence: number;
+  timestamp: string;
+};
+
+export type InjectionScoreWeights = {
+  confidence: number;
+  stability: number;
+  recency: number;
+  kindPriority: number;
+  relevance: number;
+};
+
+export type SessionStartConfig = {
+  maxItems: number;
+  maxTokenEstimate: number;
+  minConfidenceForInjection: number;
+  weights: InjectionScoreWeights;
+  perKindCaps: Record<SharedKnowledgeKind, number>;
+};
+
+export const defaultPerKindCaps: Record<SharedKnowledgeKind, number> = {
+  domain_rule: 4,
+  glossary_term: 2,
+  architecture_fact: 3,
+  user_preference: 2,
+  decision_record: 1,
+};
+
+export const kindPriorityScore: Record<SharedKnowledgeKind, number> = {
+  domain_rule: 1.0,
+  glossary_term: 0.9,
+  architecture_fact: 0.8,
+  user_preference: 0.6,
+  decision_record: 0.5,
+};
+
+export const isSharedKnowledgeKind = (
+  value: string,
+): value is SharedKnowledgeKind =>
+  sharedKnowledgeKinds.includes(value as SharedKnowledgeKind);
+
+export const isApprovalStatus = (value: string): value is ApprovalStatus =>
+  approvalStatuses.includes(value as ApprovalStatus);
+
+// --- Whisper Types ---
+
+export type WhisperTopReason = "keyword" | "tag" | "session_affinity" | "kind_priority";
+
+export type WhisperRecord = {
+  contentHash: string;
+  kind: string;
+  source: "shared" | "hint";
+  topReason: WhisperTopReason;
+  turnIndex: number;
+  whisperCount: number;
+};
+
+export type WhisperSessionState = {
+  sessionKey: string;
+  turnIndex: number;
+  recentFiles: string[];
+  recentToolNames: string[];
+  whisperHistory: WhisperRecord[];
+  injectedContentHashes: string[];
+};
+
+export const whisperLabelMap: Record<SharedKnowledgeKind, string> = {
+  domain_rule: "rule",
+  architecture_fact: "architecture",
+  decision_record: "decision",
+  user_preference: "preference",
+  glossary_term: "term",
+};

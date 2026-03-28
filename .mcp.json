@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "lore": {
+      "command": "node",
+      "args": ["--import", "tsx", "./src/mcp/stdio-transport.ts"],
+      "transport": "stdio"
+    }
+  }
+}

@@ -1,0 +1,82 @@
+<svg width="680" viewBox="0 0 680 580" xmlns="http://www.w3.org/2000/svg" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;">
+<style>
+  .label { font-size: 12px; fill: #656360; }
+  .title { font-size: 14px; font-weight: 500; }
+  .sub { font-size: 12px; }
+  .arr { stroke-width: 1.2; }
+</style>
+
+<defs>
+  <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </marker>
+</defs>
+
+<!-- Step 1: User types -->
+<rect x="220" y="20" width="240" height="44" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text class="title" x="340" y="46" text-anchor="middle" fill="#444441">User types a prompt</text>
+
+<line x1="340" y1="64" x2="340" y2="90" class="arr" stroke="#B4B2A9" marker-end="url(#arrow)"/>
+
+<!-- Step 2: Hook fires -->
+<rect x="170" y="92" width="340" height="44" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.5"/>
+<text class="title" x="340" y="118" text-anchor="middle" fill="#633806">UserPromptSubmit hook fires</text>
+
+<line x1="340" y1="136" x2="340" y2="162" class="arr" stroke="#FAC775" marker-end="url(#arrow)"/>
+
+<!-- Step 3: Scoring container -->
+<rect x="120" y="164" width="440" height="108" rx="12" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+<text class="title" x="340" y="190" text-anchor="middle" fill="#3C3489">Score each shared knowledge entry</text>
+
+<!-- Scoring factor pills -->
+<rect x="140" y="202" width="120" height="30" rx="6" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+<text class="sub" x="200" y="221" text-anchor="middle" fill="#085041">Keyword match</text>
+
+<rect x="272" y="202" width="100" height="30" rx="6" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+<text class="sub" x="322" y="221" text-anchor="middle" fill="#085041">Tag overlap</text>
+
+<rect x="384" y="202" width="80" height="30" rx="6" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+<text class="sub" x="424" y="221" text-anchor="middle" fill="#085041">Affinity</text>
+
+<rect x="140" y="240" width="140" height="30" rx="6" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+<text class="sub" x="210" y="259" text-anchor="middle" fill="#085041">Repetition decay</text>
+
+<rect x="292" y="240" width="172" height="30" rx="6" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+<text class="sub" x="378" y="259" text-anchor="middle" fill="#085041">Hard-block last 2 turns</text>
+
+<!-- Arrow to decision -->
+<line x1="340" y1="272" x2="340" y2="304" class="arr" stroke="#AFA9EC" marker-end="url(#arrow)"/>
+
+<!-- Decision box -->
+<rect x="195" y="306" width="290" height="44" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text class="title" x="340" y="332" text-anchor="middle" fill="#444441">Score clears threshold?</text>
+
+<!-- Branch left: No -->
+<path d="M195 328 L120 328 L120 390" fill="none" class="arr" stroke="#B4B2A9" marker-end="url(#arrow)"/>
+<text class="label" x="148" y="320" text-anchor="middle">no</text>
+
+<rect x="50" y="392" width="140" height="44" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+<text class="title" x="120" y="418" text-anchor="middle" fill="#444441">Silent — no output</text>
+
+<!-- Branch right: Yes -->
+<path d="M485 328 L560 328 L560 390" fill="none" class="arr" stroke="#FAC775" marker-end="url(#arrow)"/>
+<text class="label" x="530" y="320" text-anchor="middle">yes</text>
+
+<rect x="460" y="392" width="190" height="56" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.5"/>
+<text class="title" x="555" y="414" text-anchor="middle" fill="#633806">Whisper 1–4 bullets</text>
+<text class="sub" x="555" y="434" text-anchor="middle" fill="#854F0B">Dedup vs. SessionStart</text>
+
+<!-- Converge to agent -->
+<line x1="120" y1="436" x2="120" y2="466" class="arr" stroke="#B4B2A9" marker-end="url(#arrow)"/>
+<path d="M120 466 L280 466 L280 484" fill="none" class="arr" stroke="#B4B2A9" marker-end="url(#arrow)"/>
+<path d="M555 448 L555 466 L400 466 L400 484" fill="none" class="arr" stroke="#FAC775" marker-end="url(#arrow)"/>
+
+<!-- Agent box -->
+<rect x="210" y="486" width="260" height="44" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+<text class="title" x="340" y="512" text-anchor="middle" fill="#3C3489">Agent processes prompt</text>
+
+<!-- Stop hook -->
+<line x1="340" y1="530" x2="340" y2="554" class="arr" stroke="#AFA9EC" marker-end="url(#arrow)"/>
+<text class="label" x="340" y="572" text-anchor="middle">Stop hook updates session state for next turn</text>
+
+</svg>

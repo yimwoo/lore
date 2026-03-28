@@ -1,0 +1,365 @@
+import type {
+  SharedKnowledgeEntry,
+  SharedKnowledgeKind,
+} from "../shared/types";
+import type { SharedKnowledgeStore } from "../core/shared-store";
+import type { FileApprovalStore } from "./approval-store";
+import type { PromotionCriteria } from "../config";
+import {
+  contentHash,
+  validatePromotionInput,
+} from "../shared/validators";
+import { checkForbidPatterns, validateStateTransition } from "./policy";
+
+export type PromoteInput = {
+  kind: SharedKnowledgeKind;
+  title: string;
+  content: string;
+  tags?: string[];
+  sourceProjectId?: string;
+  sourceMemoryId?: string;
+};
+
+export type PromoteResult =
+  | { ok: true; entry: SharedKnowledgeEntry; action: "created" | "merged" | "upgraded" }
+  | { ok: false; reason: string };
+
+export type DemoteResult =
+  | { ok: true; entry: SharedKnowledgeEntry }
+  | { ok: false; reason: string };
+
+export type ApproveResult =
+  | { ok: true; entry: SharedKnowledgeEntry }
+  | { ok: false; reason: string };
+
+export type RejectResult =
+  | { ok: true; entry: SharedKnowledgeEntry }
+  | { ok: false; reason: string };
+
+type PromoterOptions = {
+  sharedStore: SharedKnowledgeStore;
+  approvalStore: FileApprovalStore;
+  policy: Record<SharedKnowledgeKind, PromotionCriteria>;
+  now?: () => string;
+  createId?: () => string;
+};
+
+export class Promoter {
+  private readonly sharedStore: SharedKnowledgeStore;
+  private readonly approvalStore: FileApprovalStore;
+  private readonly policy: Record<SharedKnowledgeKind, PromotionCriteria>;
+  private readonly now: () => string;
+  private readonly createId: () => string;
+
+  constructor(options: PromoterOptions) {
+    this.sharedStore = options.sharedStore;
+    this.approvalStore = options.approvalStore;
+    this.policy = options.policy;
+    this.now = options.now ?? (() => new Date().toISOString());
+    this.createId =
+      options.createId ??
+      (() => `sk-${Math.random().toString(36).slice(2, 10)}`);
+  }
+
+  async promoteExplicit(input: PromoteInput): Promise<PromoteResult> {
+    // 1. Validate input
+    const validation = validatePromotionInput({
+      kind: input.kind,
+      title: input.title,
+      content: input.content,
+      tags: input.tags,
+    });
+    if (!validation.ok) {
+      return { ok: false, reason: validation.reason };
+    }
+
+    // 2. Check forbid patterns
+    const forbidCheck = checkForbidPatterns(
+      input.content,
+      input.kind,
+      this.policy,
+    );
+    if (!forbidCheck.ok) {
+      return { ok: false, reason: forbidCheck.reason };
+    }
+
+    const titleForbidCheck = checkForbidPatterns(
+      input.title,
+      input.kind,
+      this.policy,
+    );
+    if (!titleForbidCheck.ok) {
+      return { ok: false, reason: titleForbidCheck.reason };
+    }
+
+    // 3. Compute contentHash
+    const hash = contentHash(input.content);
+
+    // 4. Check for existing entry with same contentHash + kind
+    const existing = await this.findExisting(hash, input.kind);
+
+    if (existing) {
+      if (
+        existing.approvalStatus === "approved"
+      ) {
+        // Merge provenance
+        return this.mergeExisting(existing, input);
+      }
+
+      if (existing.approvalStatus === "pending") {
+        // Upgrade to approved
+        return this.upgradeExisting(existing, input);
+      }
+
+      // rejected or demoted → create new entry (no resurrection)
+    }
+
+    // 5. Create new entry
+    return this.createNew(input, hash);
+  }
+
+  async demote(id: string, reason: string): Promise<DemoteResult> {
+    const entry = await this.sharedStore.getById(id);
+    if (!entry) {
+      return { ok: false, reason: `Entry not found: ${id}` };
+    }
+
+    const transition = validateStateTransition(
+      entry.approvalStatus,
+      "demoted",
+    );
+    if (!transition.ok) {
+      return { ok: false, reason: transition.reason };
+    }
+
+    // Ledger first
+    await this.approvalStore.append({
+      knowledgeEntryId: id,
+      action: "demote",
+      actor: "user",
+      actionSource: "explicit",
+      reason,
+    });
+
+    // Then update shared store
+    const result = await this.sharedStore.update(id, {
+      approvalStatus: "demoted",
+      demotedAt: this.now(),
+      statusReason: reason,
+    });
+
+    if (!result.ok) {
+      return { ok: false, reason: result.reason ?? "Failed to update entry." };
+    }
+
+    const updated = await this.sharedStore.getById(id);
+    return { ok: true, entry: updated! };
+  }
+
+  async approve(id: string, reason?: string): Promise<ApproveResult> {
+    const entry = await this.sharedStore.getById(id);
+    if (!entry) {
+      return { ok: false, reason: `Entry not found: ${id}` };
+    }
+
+    const transition = validateStateTransition(
+      entry.approvalStatus,
+      "approved",
+    );
+    if (!transition.ok) {
+      return { ok: false, reason: transition.reason };
+    }
+
+    await this.approvalStore.append({
+      knowledgeEntryId: id,
+      action: "approve",
+      actor: "user",
+      actionSource: "explicit",
+      reason,
+    });
+
+    await this.sharedStore.update(id, {
+      approvalStatus: "approved",
+      approvedAt: this.now(),
+      statusReason: reason,
+    });
+
+    const updated = await this.sharedStore.getById(id);
+    return { ok: true, entry: updated! };
+  }
+
+  async reject(id: string, reason: string): Promise<RejectResult> {
+    const entry = await this.sharedStore.getById(id);
+    if (!entry) {
+      return { ok: false, reason: `Entry not found: ${id}` };
+    }
+
+    const transition = validateStateTransition(
+      entry.approvalStatus,
+      "rejected",
+    );
+    if (!transition.ok) {
+      return { ok: false, reason: transition.reason };
+    }
+
+    await this.approvalStore.append({
+      knowledgeEntryId: id,
+      action: "reject",
+      actor: "user",
+      actionSource: "explicit",
+      reason,
+    });
+
+    await this.sharedStore.update(id, {
+      approvalStatus: "rejected",
+      rejectedAt: this.now(),
+      statusReason: reason,
+    });
+
+    const updated = await this.sharedStore.getById(id);
+    return { ok: true, entry: updated! };
+  }
+
+  private async findExisting(
+    hash: string,
+    kind: SharedKnowledgeKind,
+  ): Promise<SharedKnowledgeEntry | null> {
+    const entries = await this.sharedStore.list({
+      kind,
+      approvalStatus: "approved",
+    });
+    const match = entries.find((e) => e.contentHash === hash);
+    if (match) return match;
+
+    // Also check pending
+    const pending = await this.sharedStore.list({
+      kind,
+      approvalStatus: "pending",
+    });
+    const pendingMatch = pending.find((e) => e.contentHash === hash);
+    if (pendingMatch) return pendingMatch;
+
+    return null;
+  }
+
+  private async mergeExisting(
+    existing: SharedKnowledgeEntry,
+    input: PromoteInput,
+  ): Promise<PromoteResult> {
+    const mergedProjectIds = Array.from(
+      new Set([
+        ...existing.sourceProjectIds,
+        ...(input.sourceProjectId ? [input.sourceProjectId] : []),
+      ]),
+    );
+    const mergedMemoryIds = Array.from(
+      new Set([
+        ...existing.sourceMemoryIds,
+        ...(input.sourceMemoryId ? [input.sourceMemoryId] : []),
+      ]),
+    );
+    const mergedTags = Array.from(
+      new Set([...existing.tags, ...(input.tags ?? [])]),
+    );
+
+    // Ledger first
+    await this.approvalStore.append({
+      knowledgeEntryId: existing.id,
+      action: "promote",
+      actor: "user",
+      actionSource: "explicit",
+      reason: "Merged with existing entry",
+    });
+
+    // Then update
+    await this.sharedStore.update(existing.id, {
+      sourceProjectIds: mergedProjectIds,
+      sourceMemoryIds: mergedMemoryIds,
+      tags: mergedTags,
+      sessionCount: existing.sessionCount + 1,
+      projectCount: mergedProjectIds.length,
+      lastSeenAt: this.now(),
+    });
+
+    const updated = await this.sharedStore.getById(existing.id);
+    return { ok: true, entry: updated!, action: "merged" };
+  }
+
+  private async upgradeExisting(
+    existing: SharedKnowledgeEntry,
+    input: PromoteInput,
+  ): Promise<PromoteResult> {
+    // Ledger first
+    await this.approvalStore.append({
+      knowledgeEntryId: existing.id,
+      action: "approve",
+      actor: "user",
+      actionSource: "explicit",
+      reason: "Upgraded from pending via explicit promotion",
+    });
+
+    // Then update
+    await this.sharedStore.update(existing.id, {
+      approvalStatus: "approved",
+      approvedAt: this.now(),
+      statusReason: "Upgraded from pending via explicit promotion",
+      sourceProjectIds: Array.from(
+        new Set([
+          ...existing.sourceProjectIds,
+          ...(input.sourceProjectId ? [input.sourceProjectId] : []),
+        ]),
+      ),
+      tags: Array.from(
+        new Set([...existing.tags, ...(input.tags ?? [])]),
+      ),
+    });
+
+    const updated = await this.sharedStore.getById(existing.id);
+    return { ok: true, entry: updated!, action: "upgraded" };
+  }
+
+  private async createNew(
+    input: PromoteInput,
+    hash: string,
+  ): Promise<PromoteResult> {
+    const timestamp = this.now();
+    const id = this.createId();
+
+    const entry: SharedKnowledgeEntry = {
+      id,
+      kind: input.kind,
+      title: input.title,
+      content: input.content,
+      confidence: 1.0,
+      tags: input.tags ?? [],
+      sourceProjectIds: input.sourceProjectId ? [input.sourceProjectId] : [],
+      sourceMemoryIds: input.sourceMemoryId ? [input.sourceMemoryId] : [],
+      promotionSource: "explicit",
+      createdBy: "user",
+      approvalStatus: "approved",
+      approvedAt: timestamp,
+      sessionCount: 1,
+      projectCount: input.sourceProjectId ? 1 : 0,
+      lastSeenAt: timestamp,
+      contentHash: hash,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+
+    // Ledger first
+    await this.approvalStore.append({
+      knowledgeEntryId: id,
+      action: "promote",
+      actor: "user",
+      actionSource: "explicit",
+    });
+
+    // Then save to shared store
+    const result = await this.sharedStore.save(entry);
+    if (!result.ok) {
+      return { ok: false, reason: result.reason ?? "Failed to save entry." };
+    }
+
+    return { ok: true, entry, action: "created" };
+  }
+}

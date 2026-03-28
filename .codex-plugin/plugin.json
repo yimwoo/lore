@@ -1,0 +1,12 @@
+{
+  "name": "lore",
+  "version": "0.1.0",
+  "description": "Lore — shared cross-project knowledge with SessionStart injection, MCP recall tools, and advisory hints.",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Lore",
+    "shortDescription": "Cross-project shared knowledge for Codex",
+    "category": "Productivity"
+  }
+}

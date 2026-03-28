@@ -51,6 +51,17 @@ const readStdin = (): Promise<string> => {
   });
 };
 
+const getLoreCapabilities = (): LoreCapabilities => ({
+  // The plugin bundles Lore's recall MCP server, so the agent can rely on
+  // recall tools being present when this SessionStart hook is active.
+  recall: true,
+  // Promotion and demotion remain manual/CLI-driven until inline mutation
+  // tools are exposed to the agent.
+  promote: false,
+  demote: false,
+  cliAvailable: false,
+});
+
 export const runSessionStart = async (
   stdinData?: string,
 ): Promise<{ additionalContext: string }> => {
@@ -109,13 +120,7 @@ export const runSessionStart = async (
       }
     }
 
-    // Baseline capabilities — MCP tools not yet wired
-    const capabilities: LoreCapabilities = {
-      recall: false,
-      promote: false,
-      demote: false,
-      cliAvailable: false,
-    };
+    const capabilities = getLoreCapabilities();
 
     const template = renderSessionStartTemplate({
       entries: result.selectedEntries,

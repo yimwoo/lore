@@ -1,24 +1,47 @@
 {
   "name": "lore",
-  "version": "0.1.0",
-  "description": "Lore — shared cross-project knowledge with SessionStart injection, MCP recall tools, and advisory hints.",
+  "version": "1.0.0",
+  "description": "Persistent cross-project memory for Codex — rules, decisions, and context that follow you.",
   "author": {
-    "name": "yimwoo"
+    "name": "Yiming Wu",
+    "url": "https://github.com/yimwoo"
   },
   "homepage": "https://github.com/yimwoo/lore",
   "repository": "https://github.com/yimwoo/lore",
   "license": "MIT",
-  "keywords": ["lore", "codex", "memory", "knowledge", "mcp"],
+  "keywords": [
+    "lore",
+    "codex",
+    "codex-plugin",
+    "memory",
+    "cross-project",
+    "knowledge-management",
+    "mcp",
+    "mcp-server",
+    "whisper",
+    "context",
+    "second-brain",
+    "developer-tools"
+  ],
   "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Lore",
-    "shortDescription": "Cross-project shared knowledge for Codex",
-    "longDescription": "Use Lore to persist domain rules, architecture facts, decisions, glossary terms, and coding preferences across projects and sessions.",
+    "shortDescription": "Cross-project memory — rules, decisions, and context that persist across sessions.",
+    "longDescription": "Lore gives your coding agent a persistent second brain. Promote domain rules, architecture facts, past decisions, coding preferences, and glossary terms into shared knowledge — then Lore delivers them automatically through four layers: SessionStart injection at session open, adaptive whispers before each prompt, MCP recall tools for deep on-demand search, and pre-turn advisory hints. Silent when nothing is relevant. Always under your control.",
     "developerName": "Yiming Wu",
     "category": "Productivity",
     "capabilities": ["Interactive", "Read", "Write"],
-    "defaultPrompt": "Recall and apply shared project knowledge, rules, and decisions with Lore",
-    "websiteURL": "https://github.com/yimwoo/lore"
+    "defaultPrompt": [
+      "What domain rules apply to this codebase?",
+      "Recall architecture decisions relevant to this task",
+      "Search Lore for conventions I should follow here"
+    ],
+    "websiteURL": "https://github.com/yimwoo/lore",
+    "brandColor": "#534AB7",
+    "composerIcon": "./assets/lore-icon.png",
+    "logo": "./assets/lore-logo.png",
+    "screenshots": ["./assets/lore-social-preview.png"]
   }
 }

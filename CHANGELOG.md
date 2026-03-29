@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.4.0] - 2026-03-29
+
+### Added
+
+- Conversational Lore approval foundations, including visible receipt and suggestion metadata, project-local suppression storage, and approval provenance for captured and convergence-approved entries.
+- New suppression-store, whisper-state, stop-observer, whisper, and consolidator coverage for conversational approval flows and convergence auto-approval limits.
+
+### Changed
+
+- SessionStart instructions now teach the agent the conversational Lore tag surface, and SessionStart templates can render one-turn `[Lore · saved]` receipts.
+- Pre-prompt whispers can now surface pending entries as `[Lore · suggested @lN]` suggestions with `lore yes` / `lore no` affordances.
+- Stop-hook helpers now parse Lore directives and resolve visible-item targets deterministically, including receipt-first dismiss behavior.
+- Consolidation observations now track optional context-key diversity and can auto-approve low-risk converged entries with `approvalSource: "auto:convergence"` capped at three approvals per run.
+- CLI list and inspect output now show Lore approval provenance directly.
+
 ## [1.3.2] - 2026-03-28
 
 ### Added

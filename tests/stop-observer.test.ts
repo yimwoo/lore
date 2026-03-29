@@ -1,8 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ExtractionProvider } from "../src/extraction/extraction-provider";
-import { applyStopUpdate, buildTurnArtifact, runStopObserver } from "../src/plugin/stop-observer";
-import type { WhisperSessionState } from "../src/shared/types";
+import {
+  applyStopUpdate,
+  buildTurnArtifact,
+  parseLoreDirectives,
+  resolveLoreDirectiveTarget,
+  runStopObserver,
+} from "../src/plugin/stop-observer";
+import type { VisibleLoreItem, WhisperSessionState } from "../src/shared/types";
 import { resolveConfig } from "../src/config";
 
 const config = resolveConfig().whisper;
@@ -21,6 +27,8 @@ const makeState = (
   recentToolNames: ["Read"],
   whisperHistory: [],
   injectedContentHashes: ["hash-1"],
+  activeReceipt: undefined,
+  visibleItems: [],
   ...overrides,
 });
 
@@ -97,6 +105,34 @@ describe("applyStopUpdate", () => {
     expect(updated.injectedContentHashes).toEqual(["hash-1", "hash-2"]);
   });
 
+  it("preserves activeReceipt and visibleItems", () => {
+    const state = makeState({
+      activeReceipt: {
+        sessionKey: "test-key",
+        entryId: "sk-0001",
+        kind: "saved",
+        createdAt: "2026-01-01T00:00:00Z",
+        expiresAfterTurn: 4,
+        undoCommand: "lore no",
+      },
+      visibleItems: [
+        {
+          handle: "@l1",
+          entryId: "sk-0001",
+          itemType: "receipt",
+          projectId: "proj-a",
+          turnIndex: 3,
+          actionOnDismiss: "demote_undo_captured",
+          actionOnApprove: "approve_pending",
+        },
+      ],
+    });
+
+    const updated = applyStopUpdate(state, {});
+    expect(updated.activeReceipt?.entryId).toBe("sk-0001");
+    expect(updated.visibleItems?.[0]?.handle).toBe("@l1");
+  });
+
   it("handles empty tool_calls array", () => {
     const updated = applyStopUpdate(makeState(), { tool_calls: [] });
     expect(updated.recentToolNames).toEqual(["Read"]);
@@ -134,6 +170,72 @@ describe("buildTurnArtifact", () => {
       files: ["src/db/migrate.ts", "src/plugin/stop-observer.ts"],
       recentToolNames: ["Read", "Edit"],
     });
+  });
+});
+
+describe("parseLoreDirectives", () => {
+  it("parses capture directives with explicit kind", () => {
+    expect(
+      parseLoreDirectives(
+        "Done.\n[lore:capture kind=domain_rule] DB columns use snake_case.",
+      ),
+    ).toEqual([
+      {
+        type: "capture",
+        kind: "domain_rule",
+        content: "DB columns use snake_case.",
+      },
+    ]);
+  });
+
+  it("parses approve and dismiss directives", () => {
+    expect(
+      parseLoreDirectives("[lore:approve id=@l2]\n[lore:dismiss]"),
+    ).toEqual([
+      { type: "approve", id: "@l2" },
+      { type: "dismiss" },
+    ]);
+  });
+});
+
+describe("resolveLoreDirectiveTarget", () => {
+  const visibleItems: VisibleLoreItem[] = [
+    {
+      handle: "@l1",
+      entryId: "sk-0001",
+      itemType: "receipt",
+      projectId: "proj-a",
+      turnIndex: 4,
+      actionOnDismiss: "demote_undo_captured",
+      actionOnApprove: "approve_pending",
+    },
+    {
+      handle: "@l2",
+      entryId: "sk-0002",
+      itemType: "suggested",
+      projectId: "proj-a",
+      turnIndex: 4,
+      actionOnDismiss: "reject_pending",
+      actionOnApprove: "approve_pending",
+    },
+  ];
+
+  it("prefers the receipt for bare dismiss", () => {
+    expect(
+      resolveLoreDirectiveTarget({ type: "dismiss" }, visibleItems),
+    ).toMatchObject({ handle: "@l1" });
+  });
+
+  it("targets the first suggested item for bare approve", () => {
+    expect(
+      resolveLoreDirectiveTarget({ type: "approve" }, visibleItems),
+    ).toMatchObject({ handle: "@l2" });
+  });
+
+  it("resolves explicit handles directly", () => {
+    expect(
+      resolveLoreDirectiveTarget({ type: "dismiss", id: "@l2" }, visibleItems),
+    ).toMatchObject({ handle: "@l2" });
   });
 });
 

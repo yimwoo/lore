@@ -4,6 +4,7 @@ import type {
   SessionStartTemplateInput,
   SharedKnowledgeKind,
 } from "../shared/types";
+import { whisperLabelMap } from "../shared/types";
 
 const KIND_HEADERS: Record<SharedKnowledgeKind, string> = {
   domain_rule: "Domain Rules",
@@ -62,7 +63,21 @@ Bad:
 
 If none of the Lore entries below are relevant to the current task, do not mention Lore at all.
 Never say "Lore didn't have anything relevant" or "I checked Lore but found nothing."
-Just respond normally.`;
+Just respond normally.
+
+### Emit Lore tags only for visible items
+
+When the user states a general rule in their own words, you may capture it with:
+  - \`[lore:capture kind=<kind>]\`
+
+When the user confirms a currently visible Lore suggestion:
+  - \`[lore:approve]\`
+
+When the user rejects a currently visible Lore receipt or suggestion:
+  - \`[lore:dismiss]\`
+
+Only emit these tags when the referenced Lore item is visible in the current context.
+Do not emit them speculatively.`;
 
 const renderRecallSection = (capabilities: LoreCapabilities): string => {
   if (!capabilities.recall) return "";
@@ -200,6 +215,17 @@ Lore has ${pendingCount} pending suggestion${pendingCount === 1 ? "" : "s"}.
 -> \`lore list-shared --status pending\``;
 };
 
+const renderSavedReceipt = (
+  savedReceipt: SessionStartTemplateInput["savedReceipt"],
+): string => {
+  if (!savedReceipt) {
+    return "";
+  }
+
+  return `[Lore · saved ${savedReceipt.handle}]
+- **${whisperLabelMap[savedReceipt.kind]}**: ${savedReceipt.content} (\`${savedReceipt.undoCommand}\` to undo)`;
+};
+
 const renderWhisperReference = (): string =>
   `## Whisper Format Reference
 
@@ -305,9 +331,9 @@ These are UX-level tuning decisions that should be reviewed after real-world usa
 export const renderSessionStartTemplate = (
   input: SessionStartTemplateInput,
 ): string | null => {
-  const { entries, capabilities, pendingCount = 0 } = input;
+  const { entries, capabilities, pendingCount = 0, savedReceipt } = input;
 
-  if (entries.length === 0 && pendingCount === 0) return null;
+  if (entries.length === 0 && pendingCount === 0 && !savedReceipt) return null;
 
   const sections = [
     renderLoreIntro(capabilities),
@@ -317,6 +343,7 @@ export const renderSessionStartTemplate = (
     renderPromotionSection(capabilities),
     renderConflictSection(capabilities),
     entries.length > 0 ? renderSessionKnowledge(entries) : "",
+    renderSavedReceipt(savedReceipt),
     renderPendingDigest(pendingCount),
     renderWhisperReference(),
     renderBehaviorTable(capabilities),

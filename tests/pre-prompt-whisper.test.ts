@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   formatWhisper,
+  parseLoreMicroCommand,
   selectWhisperBullets,
   updateWhisperHistory,
 } from "../src/plugin/pre-prompt-whisper";
@@ -282,6 +283,30 @@ describe("selectWhisperBullets", () => {
     expect(bullets.length).toBeGreaterThan(1);
     expect(bullets[0]!.source).toBe("shared");
   });
+
+  it("surfaces a relevant pending entry as a suggested whisper with a handle", () => {
+    const bullets = selectWhisperBullets(
+      { promptText: "fix database column naming", sessionKey: "k", cwd: "/proj-1" },
+      makeState(),
+      [
+        makeEntry({
+          id: "sk-pending-1",
+          approvalStatus: "pending",
+          promotionSource: "suggested",
+          createdBy: "system",
+        }),
+      ],
+      [],
+      config,
+    );
+
+    expect(bullets).toHaveLength(1);
+    expect(bullets[0]).toMatchObject({
+      displayMode: "suggested",
+      handle: "@l1",
+      entryId: "sk-pending-1",
+    });
+  });
 });
 
 describe("formatWhisper", () => {
@@ -296,6 +321,27 @@ describe("formatWhisper", () => {
 
   it("returns empty string for no bullets", () => {
     expect(formatWhisper([])).toBe("");
+  });
+
+  it("formats suggested bullets with a dedicated header and handle", () => {
+    const output = formatWhisper([
+      {
+        label: "rule",
+        text: "Feature flags live in config/flags.ts.",
+        contentHash: "hash-1",
+        kind: "domain_rule",
+        source: "shared",
+        topReason: "keyword",
+        score: 0.8,
+        displayMode: "suggested",
+        handle: "@l2",
+        entryId: "sk-pending-1",
+      },
+    ]);
+
+    expect(output).toBe(
+      "[Lore · suggested @l2]\n- **rule**: Feature flags live in config/flags.ts. (`lore yes` to keep, `lore no` to dismiss)",
+    );
   });
 });
 
@@ -336,6 +382,25 @@ describe("updateWhisperHistory", () => {
 
     const updated = updateWhisperHistory(state, bullets);
     expect(updated.whisperHistory).toHaveLength(0);
+  });
+});
+
+describe("parseLoreMicroCommand", () => {
+  it("parses bare lore yes", () => {
+    expect(parseLoreMicroCommand("lore yes")).toEqual({
+      action: "approve",
+    });
+  });
+
+  it("parses lore no with an explicit target", () => {
+    expect(parseLoreMicroCommand("lore no sk-123")).toEqual({
+      action: "dismiss",
+      target: "sk-123",
+    });
+  });
+
+  it("returns null for normal prompts", () => {
+    expect(parseLoreMicroCommand("please fix the failing test")).toBeNull();
   });
 });
 

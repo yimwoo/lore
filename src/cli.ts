@@ -325,8 +325,8 @@ const renderSharedListText = (entries: SharedKnowledgeEntry[]): string => {
     return "No shared knowledge entries found.";
   }
 
-  const lines = ["ID                | Kind              | Title                          | Confidence | Status   | Projects"];
-  lines.push("------------------|-------------------|--------------------------------|------------|----------|--------");
+  const lines = ["ID                | Kind              | Title                          | Confidence | Status   | Approval Source     | Projects"];
+  lines.push("------------------|-------------------|--------------------------------|------------|----------|---------------------|--------");
 
   for (const entry of entries) {
     const id = entry.id.padEnd(18);
@@ -336,8 +336,9 @@ const renderSharedListText = (entries: SharedKnowledgeEntry[]): string => {
       : entry.title.padEnd(30);
     const confidence = entry.confidence.toFixed(2).padEnd(12);
     const status = entry.approvalStatus.padEnd(10);
+    const approvalSource = (entry.approvalSource ?? "manual").padEnd(21);
     const projects = String(entry.projectCount);
-    lines.push(`${id}| ${kind}| ${title} | ${confidence}| ${status}| ${projects}`);
+    lines.push(`${id}| ${kind}| ${title} | ${confidence}| ${status}| ${approvalSource}| ${projects}`);
   }
 
   return lines.join("\n");
@@ -401,6 +402,7 @@ const runInspect = async (
     `Content: ${entry.content}`,
     `Confidence: ${entry.confidence}`,
     `Status: ${entry.approvalStatus}`,
+    `Approval Source: ${entry.approvalSource ?? "manual"}`,
     `Tags: ${entry.tags.join(", ") || "(none)"}`,
     `Source Projects: ${entry.sourceProjectIds.join(", ") || "(none)"}`,
     `Sessions: ${entry.sessionCount}, Projects: ${entry.projectCount}`,

@@ -115,6 +115,14 @@ export type ApprovalStatus = (typeof approvalStatuses)[number];
 
 export type PromotionSource = "explicit" | "suggested";
 
+export const approvalSources = [
+  "manual",
+  "implicit:user_stated",
+  "auto:convergence",
+] as const;
+
+export type ApprovalSource = (typeof approvalSources)[number];
+
 export type SharedKnowledgeEntry = {
   id: string;
   kind: SharedKnowledgeKind;
@@ -132,6 +140,7 @@ export type SharedKnowledgeEntry = {
   createdBy: "user" | "system";
 
   approvalStatus: ApprovalStatus;
+  approvalSource?: ApprovalSource;
   statusReason?: string;
   approvedAt?: string;
   rejectedAt?: string;
@@ -172,6 +181,12 @@ export type SessionStartTemplateInput = {
   entries: SelectedEntry[];
   capabilities: LoreCapabilities;
   pendingCount?: number;
+  savedReceipt?: {
+    handle: string;
+    kind: SharedKnowledgeKind;
+    content: string;
+    undoCommand: "lore no";
+  };
 };
 
 export type SharedKnowledgeFilter = {
@@ -211,6 +226,7 @@ export type ObservationEntry = {
   kind: MemoryKind;
   confidence: number;
   timestamp: string;
+  contextKey?: string;
 };
 
 export type DraftCandidate = {
@@ -274,6 +290,9 @@ export const isSharedKnowledgeKind = (
 export const isApprovalStatus = (value: string): value is ApprovalStatus =>
   approvalStatuses.includes(value as ApprovalStatus);
 
+export const isApprovalSource = (value: string): value is ApprovalSource =>
+  approvalSources.includes(value as ApprovalSource);
+
 // --- Whisper Types ---
 
 export type WhisperTopReason = "keyword" | "tag" | "session_affinity" | "kind_priority";
@@ -287,6 +306,39 @@ export type WhisperRecord = {
   whisperCount: number;
 };
 
+export type VisibleLoreItemDismissAction =
+  | "demote_undo_captured"
+  | "suppress_project"
+  | "reject_pending";
+
+export type VisibleLoreItemApproveAction = "approve_pending";
+
+export type VisibleLoreItem = {
+  handle: string;
+  entryId: string;
+  itemType: "receipt" | "suggested";
+  projectId: string;
+  turnIndex: number;
+  actionOnDismiss: VisibleLoreItemDismissAction;
+  actionOnApprove: VisibleLoreItemApproveAction;
+};
+
+export type ReceiptRecord = {
+  sessionKey: string;
+  entryId: string;
+  kind: "saved";
+  createdAt: string;
+  expiresAfterTurn: number;
+  undoCommand: "lore no";
+};
+
+export type ProjectSuppressionRecord = {
+  entryId: string;
+  projectId: string;
+  createdAt: string;
+  reason: "user:dismissed";
+};
+
 export type WhisperSessionState = {
   sessionKey: string;
   turnIndex: number;
@@ -294,6 +346,8 @@ export type WhisperSessionState = {
   recentToolNames: string[];
   whisperHistory: WhisperRecord[];
   injectedContentHashes: string[];
+  activeReceipt?: ReceiptRecord;
+  visibleItems?: VisibleLoreItem[];
 };
 
 export const whisperLabelMap: Record<SharedKnowledgeKind, string> = {

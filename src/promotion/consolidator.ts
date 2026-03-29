@@ -44,9 +44,18 @@ export type ConsolidationRunResult =
 type ObservationAggregate = {
   sessionIds: Set<string>;
   projectIds: Set<string>;
+  contextKeys: Set<string>;
   confidence: number;
   lastSeenAt: string;
 };
+
+const CONVERGENCE_SESSION_THRESHOLD = 3;
+const CONVERGENCE_CONTEXT_THRESHOLD = 3;
+const CONVERGENCE_AUTO_APPROVAL_LIMIT = 3;
+
+const isConvergenceEligibleKind = (
+  kind: SharedKnowledgeEntry["kind"],
+): boolean => kind === "domain_rule" || kind === "glossary_term";
 
 const aggregateObservations = async (
   reader: ObservationLogReader,
@@ -59,6 +68,9 @@ const aggregateObservations = async (
     if (current) {
       current.sessionIds.add(observation.sessionId);
       current.projectIds.add(observation.projectId);
+      if (observation.contextKey) {
+        current.contextKeys.add(observation.contextKey);
+      }
       current.confidence = Math.max(current.confidence, observation.confidence);
       if (observation.timestamp > current.lastSeenAt) {
         current.lastSeenAt = observation.timestamp;
@@ -69,6 +81,9 @@ const aggregateObservations = async (
     aggregates.set(observation.contentHash, {
       sessionIds: new Set([observation.sessionId]),
       projectIds: new Set([observation.projectId]),
+      contextKeys: new Set(
+        observation.contextKey ? [observation.contextKey] : [],
+      ),
       confidence: observation.confidence,
       lastSeenAt: observation.timestamp,
     });
@@ -78,6 +93,7 @@ const aggregateObservations = async (
     contentHash,
     sessionCount: aggregate.sessionIds.size,
     projectCount: aggregate.projectIds.size,
+    contextKeyCount: aggregate.contextKeys.size,
     lastSeenAt: aggregate.lastSeenAt,
     confidence: aggregate.confidence,
     sampleProjectIds: Array.from(aggregate.projectIds),
@@ -100,6 +116,9 @@ const reconcilePendingEntry = async (
       sourceTurnCount: entry.sourceTurnCount,
       sourceProjectIds: entry.sourceProjectIds,
       sourceMemoryIds: entry.sourceMemoryIds,
+      approvalStatus: entry.approvalStatus,
+      approvalSource: entry.approvalSource,
+      approvedAt: entry.approvedAt,
       sessionCount: entry.sessionCount,
       projectCount: entry.projectCount,
       lastSeenAt: entry.lastSeenAt,
@@ -280,9 +299,39 @@ export class Consolidator {
 
       const savedEntryIds: string[] = [];
       const mergedEntryIds: string[] = [];
+      let autoApprovedCount = 0;
 
       for (const consolidated of result.entries) {
-        const survivorId = await reconcilePendingEntry(this.sharedStore, consolidated.entry);
+        const observation = observations.find(
+          (candidate) => candidate.contentHash === consolidated.entry.contentHash,
+        );
+        const shouldAutoApprove =
+          consolidated.entry.approvalStatus === "pending" &&
+          isConvergenceEligibleKind(consolidated.entry.kind) &&
+          autoApprovedCount < CONVERGENCE_AUTO_APPROVAL_LIMIT &&
+          (observation?.sessionCount ?? consolidated.entry.sessionCount) >=
+            CONVERGENCE_SESSION_THRESHOLD &&
+          (observation?.contextKeyCount ?? 0) >= CONVERGENCE_CONTEXT_THRESHOLD;
+        const entryToSave = shouldAutoApprove
+          ? {
+              ...consolidated.entry,
+              approvalStatus: "approved" as const,
+              approvalSource: "auto:convergence" as const,
+              approvedAt: this.now(),
+            }
+          : consolidated.entry;
+        if (shouldAutoApprove) {
+          autoApprovedCount += 1;
+          log("debug", "consolidation.entry_auto_approved", {
+            contentHash: consolidated.entry.contentHash,
+            sessionCount: observation?.sessionCount ?? consolidated.entry.sessionCount,
+            contextKeyCount: observation?.contextKeyCount ?? 0,
+          }, {
+            ok: true,
+          });
+        }
+
+        const survivorId = await reconcilePendingEntry(this.sharedStore, entryToSave);
         savedEntryIds.push(survivorId);
         log("debug", "consolidation.entry_saved", {
           survivorId,

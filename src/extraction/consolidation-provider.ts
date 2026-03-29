@@ -6,6 +6,7 @@ export type ConsolidationObservation = {
   contentHash: string;
   sessionCount: number;
   projectCount: number;
+  contextKeyCount?: number;
   lastSeenAt: string;
   confidence: number;
   sampleProjectIds: string[];

@@ -6,7 +6,8 @@ import type { LoreConfig } from "../config";
 import type { ExtractionProvider, TurnArtifact } from "../extraction/extraction-provider";
 import { DraftStoreWriter } from "../promotion/draft-store";
 import { deriveSessionKey, readWhisperState, writeWhisperState } from "./whisper-state";
-import type { WhisperSessionState } from "../shared/types";
+import type { VisibleLoreItem, WhisperSessionState } from "../shared/types";
+import { isSharedKnowledgeKind } from "../shared/types";
 import {
   createRunId,
   debugLoggingEnabled,
@@ -29,6 +30,17 @@ type StopInput = {
 type DraftWriter = {
   append: (entry: Awaited<ReturnType<ExtractionProvider["extractCandidates"]>>[number]) => Promise<void>;
 };
+
+export type LoreDirective =
+  | {
+      type: "capture";
+      kind: string;
+      content: string;
+    }
+  | {
+      type: "approve" | "dismiss";
+      id?: string;
+    };
 
 type StopObserverDependencies = {
   config?: LoreConfig;
@@ -83,8 +95,64 @@ export const applyStopUpdate = (
   // Copy whisperHistory and injectedContentHashes as-is
   updated.whisperHistory = [...state.whisperHistory];
   updated.injectedContentHashes = [...state.injectedContentHashes];
+  updated.activeReceipt = state.activeReceipt;
+  updated.visibleItems = [...(state.visibleItems ?? [])];
 
   return updated;
+};
+
+export const parseLoreDirectives = (
+  assistantResponse: string,
+): LoreDirective[] => {
+  const directives: LoreDirective[] = [];
+  const lines = assistantResponse.split("\n");
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const captureMatch = /^\[lore:capture\s+kind=([a-z_]+)\]\s+(.+)$/i.exec(trimmed);
+    if (captureMatch) {
+      const kind = captureMatch[1]?.trim() ?? "";
+      if (!isSharedKnowledgeKind(kind) || kind === "decision_record") {
+        continue;
+      }
+      directives.push({
+        type: "capture",
+        kind,
+        content: captureMatch[2]?.trim() ?? "",
+      });
+      continue;
+    }
+
+    const actionMatch = /^\[lore:(approve|dismiss)(?:\s+id=(\S+))?\]$/i.exec(trimmed);
+    if (!actionMatch) {
+      continue;
+    }
+
+    directives.push({
+      type: actionMatch[1]?.toLowerCase() === "approve" ? "approve" : "dismiss",
+      id: actionMatch[2],
+    });
+  }
+
+  return directives;
+};
+
+export const resolveLoreDirectiveTarget = (
+  directive: Extract<LoreDirective, { type: "approve" | "dismiss" }>,
+  visibleItems: VisibleLoreItem[],
+): VisibleLoreItem | null => {
+  if (directive.id) {
+    return visibleItems.find((item) => item.handle === directive.id) ?? null;
+  }
+
+  if (directive.type === "dismiss") {
+    const receipt = visibleItems.find((item) => item.itemType === "receipt");
+    if (receipt) {
+      return receipt;
+    }
+  }
+
+  return visibleItems.find((item) => item.itemType === "suggested") ?? null;
 };
 
 const deriveProjectId = (cwd: string): string => basename(cwd) || "unknown-project";

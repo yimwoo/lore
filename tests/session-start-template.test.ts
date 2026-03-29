@@ -167,6 +167,16 @@ describe("renderSessionStartTemplate", () => {
       expect(result).toContain("lore.demote");
       expect(result).toContain("lore.promote");
     });
+
+    it("documents conversational Lore tags", () => {
+      const result = renderSessionStartTemplate({
+        entries: [makeSelectedEntry()],
+        capabilities: FULL_CAPABILITIES,
+      })!;
+      expect(result).toContain("[lore:capture kind=<kind>]");
+      expect(result).toContain("[lore:approve]");
+      expect(result).toContain("[lore:dismiss]");
+    });
   });
 
   describe("correction section", () => {
@@ -368,5 +378,22 @@ describe("renderSessionStartTemplate", () => {
     expect(result.indexOf("## Session Knowledge")).toBeLessThan(
       result.indexOf("## Pending Suggestions"),
     );
+  });
+
+  it("renders a one-turn saved receipt when provided", () => {
+    const result = renderSessionStartTemplate({
+      entries: [makeSelectedEntry()],
+      capabilities: RECALL_ONLY,
+      savedReceipt: {
+        handle: "@l1",
+        kind: "domain_rule",
+        content: "DB columns use snake_case across services.",
+        undoCommand: "lore no",
+      },
+    })!;
+
+    expect(result).toContain("[Lore · saved @l1]");
+    expect(result).toContain("DB columns use snake_case across services.");
+    expect(result).toContain("lore no");
   });
 });

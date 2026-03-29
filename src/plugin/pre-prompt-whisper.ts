@@ -34,6 +34,12 @@ type WhisperInput = {
   cwd: string;
 };
 
+export type LoreMicroCommand =
+  | {
+      action: "approve" | "dismiss";
+      target?: string;
+    };
+
 type WhisperBullet = {
   label: string;
   text: string;
@@ -42,6 +48,9 @@ type WhisperBullet = {
   source: "shared" | "hint";
   topReason: WhisperRecord["topReason"];
   score: number;
+  displayMode?: "default" | "suggested";
+  handle?: string;
+  entryId?: string;
 };
 
 const HIGH_CONFIDENCE_HINT_THRESHOLD = 0.9;
@@ -96,6 +105,23 @@ const summarizeSuppressionReason = (
   return "below_threshold";
 };
 
+const assignVisibleHandle = (index: number): string => `@l${index + 1}`;
+
+export const parseLoreMicroCommand = (
+  promptText: string,
+): LoreMicroCommand | null => {
+  const trimmed = promptText.trim();
+  const match = /^lore\s+(yes|no)(?:\s+(\S+))?$/i.exec(trimmed);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    action: match[1]?.toLowerCase() === "yes" ? "approve" : "dismiss",
+    target: match[2],
+  };
+};
+
 export const selectWhisperBullets = (
   input: WhisperInput,
   state: WhisperSessionState,
@@ -123,7 +149,9 @@ export const selectWhisperBullets = (
   // Score shared entries
   const scoredShared: WhisperBullet[] = [];
   for (const entry of sharedEntries) {
-    if (entry.approvalStatus !== "approved") continue;
+    if (entry.approvalStatus !== "approved" && entry.approvalStatus !== "pending") {
+      continue;
+    }
 
     // Hard block: skip if whispered in last N turns
     const record = historyMap.get(entry.contentHash);
@@ -156,13 +184,24 @@ export const selectWhisperBullets = (
         source: "shared",
         topReason: rel.topReason,
         score: effective,
+        displayMode:
+          entry.approvalStatus === "pending" ? "suggested" : "default",
+        entryId: entry.id,
       });
     }
   }
 
   // Sort shared by score descending, take top N
   scoredShared.sort((a, b) => b.score - a.score);
-  const selectedShared = scoredShared.slice(0, config.maxSharedBullets);
+  const selectedShared = scoredShared
+    .slice(0, config.maxSharedBullets)
+    .map((bullet, index) => ({
+      ...bullet,
+      handle:
+        bullet.displayMode === "suggested"
+          ? assignVisibleHandle(index)
+          : undefined,
+    }));
 
   // Select hint bullets (risk, next_step, focus only — no recall)
   const selectedHintTexts = new Set(selectedShared.map((b) => b.text));
@@ -212,12 +251,30 @@ export const selectWhisperBullets = (
 export const formatWhisper = (bullets: WhisperBullet[]): string => {
   if (bullets.length === 0) return "";
 
-  const lines = ["[Lore]"];
-  for (const bullet of bullets) {
-    lines.push(`- **${bullet.label}**: ${bullet.text}`);
+  const standardBullets = bullets.filter(
+    (bullet) => bullet.displayMode !== "suggested",
+  );
+  const suggestedBullets = bullets.filter(
+    (bullet) => bullet.displayMode === "suggested",
+  );
+  const sections: string[] = [];
+
+  if (standardBullets.length > 0) {
+    const lines = ["[Lore]"];
+    for (const bullet of standardBullets) {
+      lines.push(`- **${bullet.label}**: ${bullet.text}`);
+    }
+    sections.push(lines.join("\n"));
   }
 
-  return lines.join("\n");
+  for (const bullet of suggestedBullets) {
+    const handle = bullet.handle ?? assignVisibleHandle(0);
+    sections.push(
+      `[Lore · suggested ${handle}]\n- **${bullet.label}**: ${bullet.text} (\`lore yes\` to keep, \`lore no\` to dismiss)`,
+    );
+  }
+
+  return sections.join("\n\n");
 };
 
 export const updateWhisperHistory = (

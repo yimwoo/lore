@@ -326,4 +326,159 @@ describe("Consolidator", () => {
     expect(lines.some((line) => line.event === "consolidation_provider.config_loaded")).toBe(true);
     expect(lines.some((line) => line.event === "consolidation_provider.fallback_used")).toBe(true);
   });
+
+  it("auto-approves low-risk entries when observations converge across sessions and contexts", async () => {
+    const draftDir = join(testDir, "drafts");
+    const observationDir = join(testDir, "observations");
+    const sharedStore = new FileSharedStore({
+      storagePath: join(testDir, "shared.json"),
+      now: makeTimestamp,
+      createId: () => `sk-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: join(testDir, "approval-ledger.json"),
+      sharedStore,
+      now: makeTimestamp,
+      createId: () => `ledger-${String(idCounter++).padStart(4, "0")}`,
+    });
+
+    const draft = makeDraft();
+    await new DraftStoreWriter({ draftDir, sessionId: "session-1" }).append(draft);
+
+    const observationWriter = new ObservationLogWriter({
+      observationDir,
+      sessionId: "session-1",
+    });
+    for (const [sessionId, contextKey] of [
+      ["session-1", "file:db/migrations"],
+      ["session-2", "tool:psql"],
+      ["session-3", "prompt:database-naming"],
+    ] as const) {
+      await observationWriter.append({
+        sessionId,
+        projectId: "proj-1",
+        contentHash: contentHash(draft.content),
+        kind: "reminder",
+        confidence: 0.95,
+        timestamp: draft.timestamp,
+        contextKey,
+      });
+    }
+
+    const provider: ConsolidationProvider = {
+      consolidate: async () => ({
+        entries: [
+          {
+            entry: makePendingEntry({
+              id: "",
+              kind: "domain_rule",
+              title: draft.title,
+              content: draft.content,
+              contentHash: contentHash(draft.content),
+              sessionCount: 3,
+            }),
+            consumedEntryIds: [],
+          },
+        ],
+      }),
+    };
+
+    const consolidator = new Consolidator({
+      draftReader: new DraftStoreReader({ draftDir }),
+      observationReader: new ObservationLogReader({ observationDir }),
+      sharedStore,
+      approvalStore,
+      provider,
+      statePath: join(testDir, "consolidation-state.json"),
+      now: makeTimestamp,
+    });
+
+    const result = await consolidator.run();
+    expect(result.ok).toBe(true);
+
+    const approved = await sharedStore.list({ approvalStatus: "approved" });
+    expect(approved).toHaveLength(1);
+    expect(approved[0]!.approvalSource).toBe("auto:convergence");
+  });
+
+  it("caps convergence auto-approval at three entries per run", async () => {
+    const draftDir = join(testDir, "drafts");
+    const observationDir = join(testDir, "observations");
+    const sharedStore = new FileSharedStore({
+      storagePath: join(testDir, "shared.json"),
+      now: makeTimestamp,
+      createId: () => `sk-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: join(testDir, "approval-ledger.json"),
+      sharedStore,
+      now: makeTimestamp,
+      createId: () => `ledger-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const observationWriter = new ObservationLogWriter({
+      observationDir,
+      sessionId: "session-1",
+    });
+
+    const drafts = Array.from({ length: 4 }, (_, index) =>
+      makeDraft({
+        id: `draft-cap-${index}`,
+        title: `Rule ${index}`,
+        content: `Converged rule ${index}`,
+        sessionId: `session-${index + 1}`,
+      }),
+    );
+    for (const draft of drafts) {
+      await new DraftStoreWriter({ draftDir, sessionId: draft.sessionId }).append(draft);
+      for (const [sessionId, contextKey] of [
+        [`${draft.sessionId}-a`, "file:ctx-a"],
+        [`${draft.sessionId}-b`, "tool:ctx-b"],
+        [`${draft.sessionId}-c`, "prompt:ctx-c"],
+      ] as const) {
+        await observationWriter.append({
+          sessionId,
+          projectId: "proj-1",
+          contentHash: contentHash(draft.content),
+          kind: "reminder",
+          confidence: 0.95,
+          timestamp: draft.timestamp,
+          contextKey,
+        });
+      }
+    }
+
+    const provider: ConsolidationProvider = {
+      consolidate: async () => ({
+        entries: drafts.map((draft) => ({
+          entry: makePendingEntry({
+            id: "",
+            kind: "domain_rule",
+            title: draft.title,
+            content: draft.content,
+            contentHash: contentHash(draft.content),
+            sessionCount: 3,
+          }),
+          consumedEntryIds: [],
+        })),
+      }),
+    };
+
+    const consolidator = new Consolidator({
+      draftReader: new DraftStoreReader({ draftDir }),
+      observationReader: new ObservationLogReader({ observationDir }),
+      sharedStore,
+      approvalStore,
+      provider,
+      statePath: join(testDir, "consolidation-state.json"),
+      now: makeTimestamp,
+    });
+
+    const result = await consolidator.run();
+    expect(result.ok).toBe(true);
+
+    const approved = await sharedStore.list({ approvalStatus: "approved" });
+    const pending = await sharedStore.list({ approvalStatus: "pending" });
+    expect(approved).toHaveLength(3);
+    expect(pending).toHaveLength(1);
+  });
 });

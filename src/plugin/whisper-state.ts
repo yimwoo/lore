@@ -21,6 +21,22 @@ const defaultState = (sessionKey: string): WhisperSessionState => ({
   recentToolNames: [],
   whisperHistory: [],
   injectedContentHashes: [],
+  activeReceipt: undefined,
+  visibleItems: [],
+});
+
+const normalizeState = (
+  sessionKey: string,
+  state: WhisperSessionState,
+): WhisperSessionState => ({
+  ...defaultState(sessionKey),
+  ...state,
+  sessionKey,
+  recentFiles: state.recentFiles ?? [],
+  recentToolNames: state.recentToolNames ?? [],
+  whisperHistory: state.whisperHistory ?? [],
+  injectedContentHashes: state.injectedContentHashes ?? [],
+  visibleItems: state.visibleItems ?? [],
 });
 
 const statePath = (whisperStateDir: string, sessionKey: string): string =>
@@ -36,7 +52,7 @@ export const readWhisperState = async (
       "utf8",
     );
     const parsed = JSON.parse(content) as WhisperSessionState;
-    return parsed;
+    return normalizeState(sessionKey, parsed);
   } catch {
     return defaultState(sessionKey);
   }
@@ -60,7 +76,8 @@ export const writeWhisperState = async (
   whisperStateDir: string,
   config: WhisperConfig,
 ): Promise<void> => {
-  const capped = enforceCapacities(state, config);
+  const normalized = normalizeState(state.sessionKey, state);
+  const capped = enforceCapacities(normalized, config);
   const filePath = statePath(whisperStateDir, state.sessionKey);
   const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
 

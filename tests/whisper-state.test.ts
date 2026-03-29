@@ -60,6 +60,8 @@ describe("readWhisperState", () => {
     expect(state.recentFiles).toEqual([]);
     expect(state.whisperHistory).toEqual([]);
     expect(state.injectedContentHashes).toEqual([]);
+    expect(state.activeReceipt).toBeUndefined();
+    expect(state.visibleItems).toEqual([]);
   });
 });
 
@@ -81,6 +83,25 @@ describe("writeWhisperState + readWhisperState", () => {
         },
       ],
       injectedContentHashes: ["hash-1", "hash-2"],
+      activeReceipt: {
+        sessionKey: "test-key",
+        entryId: "sk-0001",
+        kind: "saved" as const,
+        createdAt: "2026-01-01T00:00:00Z",
+        expiresAfterTurn: 6,
+        undoCommand: "lore no" as const,
+      },
+      visibleItems: [
+        {
+          handle: "@l1",
+          entryId: "sk-0001",
+          itemType: "receipt" as const,
+          projectId: "proj-a",
+          turnIndex: 5,
+          actionOnDismiss: "demote_undo_captured" as const,
+          actionOnApprove: "approve_pending" as const,
+        },
+      ],
     };
 
     await writeWhisperState(state, testDir, config);
@@ -91,6 +112,8 @@ describe("writeWhisperState + readWhisperState", () => {
     expect(read.recentFiles).toEqual(["src/foo.ts", "src/bar.ts"]);
     expect(read.whisperHistory).toHaveLength(1);
     expect(read.injectedContentHashes).toEqual(["hash-1", "hash-2"]);
+    expect(read.activeReceipt?.entryId).toBe("sk-0001");
+    expect(read.visibleItems?.[0]?.handle).toBe("@l1");
   });
 });
 

@@ -124,6 +124,8 @@ const getLoreCapabilities = (): LoreCapabilities => ({
   promote: false,
   demote: false,
   cliAvailable: false,
+  // Visible Lore blocks enable [Lore · visible] rendering in agent context.
+  visibleLoreBlocks: true,
 });
 
 export const runSessionStart = async (

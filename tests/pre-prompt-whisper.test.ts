@@ -465,7 +465,10 @@ describe("runPrePromptWhisper", () => {
       expect.objectContaining({
         handle: "@l1",
         entryId: "sk-pending-1",
-        itemType: "suggested",
+        kind: "pending_suggestion",
+        entryKind: "domain_rule",
+        content: "All database columns must use snake_case naming",
+        actions: ["approve", "dismiss"],
         projectId: "proj-1",
         actionOnApprove: "approve_pending",
         actionOnDismiss: "reject_pending",
@@ -509,7 +512,10 @@ describe("runPrePromptWhisper", () => {
             {
               handle: "@l1",
               entryId: "sk-pending-1",
-              itemType: "suggested",
+              kind: "pending_suggestion",
+              entryKind: "domain_rule",
+              content: "test content",
+              actions: ["approve", "dismiss"],
               projectId: "proj-1",
               turnIndex: 5,
               actionOnDismiss: "reject_pending",

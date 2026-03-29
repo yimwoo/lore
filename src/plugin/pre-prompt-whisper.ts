@@ -18,12 +18,16 @@ import {
 } from "./whisper-scorer";
 import type {
   HintBullet,
+  LoreVisibleItem,
   SharedKnowledgeEntry,
-  VisibleLoreItem,
   WhisperRecord,
   WhisperSessionState,
 } from "../shared/types";
-import { whisperLabelMap } from "../shared/types";
+import { isSharedKnowledgeKind, whisperLabelMap } from "../shared/types";
+import {
+  formatForAgentContext,
+  formatForUserDisplay,
+} from "./lore-item-renderer";
 import {
   createRunId,
   debugLoggingEnabled,
@@ -114,52 +118,48 @@ const buildVisibleItems = (
   bullets: WhisperBullet[],
   projectId: string,
   turnIndex: number,
-): VisibleLoreItem[] =>
+): LoreVisibleItem[] =>
   bullets
     .filter(
-      (bullet): bullet is WhisperBullet & {
-        displayMode: "suggested";
-        handle: string;
-        entryId: string;
-      } =>
-        bullet.displayMode === "suggested" &&
-        typeof bullet.handle === "string" &&
-        typeof bullet.entryId === "string",
+      (bullet): bullet is WhisperBullet & { entryId: string } =>
+        typeof bullet.entryId === "string" &&
+        isSharedKnowledgeKind(bullet.kind) &&
+        bullet.displayMode === "suggested",
     )
     .map((bullet) => ({
-      handle: bullet.handle,
+      handle: bullet.handle ?? "",
       entryId: bullet.entryId,
-      itemType: "suggested",
+      kind: "pending_suggestion" as const,
+      entryKind: bullet.kind as import("../shared/types").SharedKnowledgeKind,
+      content: bullet.text,
+      actions: ["approve", "dismiss"] as const,
       projectId,
       turnIndex,
-      actionOnDismiss: "reject_pending",
-      actionOnApprove: "approve_pending",
+      actionOnDismiss: "reject_pending" as const,
+      actionOnApprove: "approve_pending" as const,
     }));
 
 const findMicroCommandTarget = (
   command: LoreMicroCommand,
   state: WhisperSessionState,
-): VisibleLoreItem | null => {
+): LoreVisibleItem | null => {
   if (command.target) {
     return (
       state.visibleItems?.find((item) => item.handle === command.target) ?? null
     );
   }
 
-  if (command.action === "dismiss" && state.activeReceipt) {
-    return {
-      handle: "@receipt",
-      entryId: state.activeReceipt.entryId,
-      itemType: "receipt",
-      projectId: "",
-      turnIndex: state.turnIndex,
-      actionOnDismiss: "demote_undo_captured",
-      actionOnApprove: "approve_pending",
-    };
+  // Bare dismiss: receipt wins over suggestion
+  if (command.action === "dismiss") {
+    const receipt = state.visibleItems?.find(
+      (item) => item.kind === "saved_receipt",
+    );
+    if (receipt) return receipt;
   }
 
+  // Bare approve or fallback dismiss: first pending suggestion
   return (
-    state.visibleItems?.find((item) => item.itemType === "suggested") ?? null
+    state.visibleItems?.find((item) => item.kind === "pending_suggestion") ?? null
   );
 };
 
@@ -484,6 +484,13 @@ export const runPrePromptWhisper = async (
     projectId,
   });
 
+  // Receipt expiry check: clear stale receipts before building items
+  const activeReceipt =
+    state.activeReceipt &&
+    state.turnIndex <= state.activeReceipt.expiresAfterTurn
+      ? state.activeReceipt
+      : undefined;
+
   const sharedStore = new FileSharedStore({
     storagePath: config.sharedStoragePath,
   });
@@ -514,7 +521,15 @@ export const runPrePromptWhisper = async (
 
   const microCommand = parseLoreMicroCommand(promptText);
   if (microCommand) {
-    const target = findMicroCommandTarget(microCommand, state);
+    const currentState: WhisperSessionState = {
+      ...state,
+      activeReceipt,
+      visibleItems: (state.visibleItems ?? []).filter((item) =>
+        item.kind === "pending_suggestion" ||
+        (item.kind === "saved_receipt" && activeReceipt?.entryId === item.entryId),
+      ),
+    };
+    const target = findMicroCommandTarget(microCommand, currentState);
     if (!target) {
       log("debug", "whisper.micro_command_ignored", {
         action: microCommand.action,
@@ -528,7 +543,7 @@ export const runPrePromptWhisper = async (
       return;
     }
 
-    if (microCommand.action === "approve" && target.itemType === "suggested") {
+    if (microCommand.action === "approve" && target.kind === "pending_suggestion") {
       const result = await promoter.approve(target.entryId);
       if (!result.ok) {
         log("warn", "whisper.micro_command_failed", {
@@ -572,7 +587,7 @@ export const runPrePromptWhisper = async (
       return;
     }
 
-    if (microCommand.action === "dismiss" && target.itemType === "suggested") {
+    if (microCommand.action === "dismiss" && target.kind === "pending_suggestion") {
       const result = await promoter.reject(
         target.entryId,
         "Dismissed from Lore suggestion.",
@@ -609,7 +624,7 @@ export const runPrePromptWhisper = async (
       return;
     }
 
-    if (microCommand.action === "dismiss" && target.itemType === "receipt") {
+    if (microCommand.action === "dismiss" && target.kind === "saved_receipt") {
       const result = await promoter.demote(
         target.entryId,
         "User undid a saved Lore entry.",
@@ -702,11 +717,63 @@ export const runPrePromptWhisper = async (
     projectId,
   });
 
-  const output = formatWhisper(bullets);
+  // Build LoreVisibleItem[] from scored bullets
+  const loreItems = buildVisibleItems(bullets, projectId, state.turnIndex);
+
+  // Construct receipt LoreVisibleItem and prepend if active
+  if (activeReceipt) {
+    const receiptEntry = sharedEntries.find(
+      (entry) => entry.id === activeReceipt.entryId,
+    );
+    if (receiptEntry) {
+      loreItems.unshift({
+        handle: "",
+        entryId: receiptEntry.id,
+        kind: "saved_receipt",
+        entryKind: receiptEntry.kind,
+        content: receiptEntry.content,
+        actions: ["dismiss"],
+        projectId,
+        turnIndex: state.turnIndex,
+        actionOnDismiss: "demote_undo_captured",
+        actionOnApprove: "approve_pending",
+      });
+    }
+  }
+
+  // Assign turn-local handles: receipt first (@l1), then suggestions
+  let handleIndex = activeReceipt ? 1 : 0;
+  for (const bullet of bullets) {
+    if (bullet.displayMode === "suggested") {
+      bullet.handle = assignVisibleHandle(handleIndex);
+      handleIndex += 1;
+    }
+  }
+  handleIndex = 0;
+  for (const item of loreItems) {
+    if (item.kind === "pending_suggestion" || item.kind === "saved_receipt") {
+      item.handle = assignVisibleHandle(handleIndex);
+      handleIndex += 1;
+    }
+  }
+
+  // Render both outputs
+  const standardAgentContext = formatWhisper(
+    bullets.filter((bullet) => bullet.displayMode !== "suggested"),
+  );
+  const actionableAgentContext = formatForAgentContext(loreItems);
+  const userDisplay = formatForUserDisplay(loreItems);
+  const output = [
+    standardAgentContext,
+    actionableAgentContext,
+    userDisplay,
+  ].filter(Boolean).join("\n\n");
+
   if (output) {
     process.stdout.write(output + "\n");
     log("info", "whisper.output_written", {
       bulletCount: bullets.length,
+      loreItemCount: loreItems.length,
       outputLength: output.length,
     }, {
       ok: true,
@@ -757,7 +824,7 @@ export const runPrePromptWhisper = async (
   if (bullets.length > 0) {
     const updatedState: WhisperSessionState = {
       ...updateWhisperHistory(state, bullets),
-      visibleItems: buildVisibleItems(bullets, projectId, state.turnIndex),
+      visibleItems: loreItems,
     };
     await writeWhisperState(updatedState, config.whisperStateDir, config.whisper);
     log("trace", "whisper.state_updated", {

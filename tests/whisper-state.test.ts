@@ -95,7 +95,10 @@ describe("writeWhisperState + readWhisperState", () => {
         {
           handle: "@l1",
           entryId: "sk-0001",
-          itemType: "receipt" as const,
+          kind: "saved_receipt" as const,
+          entryKind: "domain_rule" as const,
+          content: "test content",
+          actions: ["dismiss"] as const,
           projectId: "proj-a",
           turnIndex: 5,
           actionOnDismiss: "demote_undo_captured" as const,

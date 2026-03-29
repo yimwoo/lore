@@ -25,6 +25,14 @@ const defaultState = (sessionKey: string): WhisperSessionState => ({
   visibleItems: [],
 });
 
+const isValidLoreVisibleItem = (
+  item: Record<string, unknown>,
+): boolean =>
+  typeof item.content === "string" &&
+  typeof item.entryKind === "string" &&
+  Array.isArray(item.actions) &&
+  typeof item.kind === "string";
+
 const normalizeState = (
   sessionKey: string,
   state: WhisperSessionState,
@@ -36,7 +44,9 @@ const normalizeState = (
   recentToolNames: state.recentToolNames ?? [],
   whisperHistory: state.whisperHistory ?? [],
   injectedContentHashes: state.injectedContentHashes ?? [],
-  visibleItems: state.visibleItems ?? [],
+  visibleItems: (state.visibleItems ?? []).filter((item) =>
+    isValidLoreVisibleItem(item as unknown as Record<string, unknown>),
+  ),
 });
 
 const statePath = (whisperStateDir: string, sessionKey: string): string =>

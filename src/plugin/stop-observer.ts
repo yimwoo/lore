@@ -3,10 +3,18 @@ import { createInterface } from "node:readline";
 
 import { resolveConfig } from "../config";
 import type { LoreConfig } from "../config";
+import { FileSharedStore } from "../core/file-shared-store";
 import type { ExtractionProvider, TurnArtifact } from "../extraction/extraction-provider";
+import { FileApprovalStore } from "../promotion/approval-store";
 import { DraftStoreWriter } from "../promotion/draft-store";
+import { Promoter } from "../promotion/promoter";
+import { FileProjectSuppressionStore } from "./project-suppression-store";
 import { deriveSessionKey, readWhisperState, writeWhisperState } from "./whisper-state";
-import type { VisibleLoreItem, WhisperSessionState } from "../shared/types";
+import type {
+  LoreVisibleItem,
+  ReceiptRecord,
+  WhisperSessionState,
+} from "../shared/types";
 import { isSharedKnowledgeKind } from "../shared/types";
 import {
   createRunId,
@@ -57,6 +65,11 @@ type StopObserverDependencies = {
     config: LoreConfig["whisper"],
   ) => Promise<void>;
 };
+
+const MAX_CAPTURES_PER_STOP = 2;
+
+const deriveTitle = (content: string): string =>
+  content.length <= 80 ? content : `${content.slice(0, 77)}...`;
 
 export const applyStopUpdate = (
   state: WhisperSessionState,
@@ -139,20 +152,20 @@ export const parseLoreDirectives = (
 
 export const resolveLoreDirectiveTarget = (
   directive: Extract<LoreDirective, { type: "approve" | "dismiss" }>,
-  visibleItems: VisibleLoreItem[],
-): VisibleLoreItem | null => {
+  visibleItems: LoreVisibleItem[],
+): LoreVisibleItem | null => {
   if (directive.id) {
     return visibleItems.find((item) => item.handle === directive.id) ?? null;
   }
 
   if (directive.type === "dismiss") {
-    const receipt = visibleItems.find((item) => item.itemType === "receipt");
+    const receipt = visibleItems.find((item) => item.kind === "saved_receipt");
     if (receipt) {
       return receipt;
     }
   }
 
-  return visibleItems.find((item) => item.itemType === "suggested") ?? null;
+  return visibleItems.find((item) => item.kind === "pending_suggestion") ?? null;
 };
 
 const deriveProjectId = (cwd: string): string => basename(cwd) || "unknown-project";
@@ -325,12 +338,236 @@ export const runStopObserver = async (
     projectId,
   });
 
+  // Parse and execute Lore directives from assistant response before turnIndex increment
+  const assistantResponse = parsed.assistant_response ?? parsed.response_summary ?? parsed.response ?? "";
+  const directives = parseLoreDirectives(assistantResponse);
+  let pendingReceipt: ReceiptRecord | undefined;
+
+  if (directives.length > 0) {
+    log("debug", "stop.directives_parsed", {
+      directiveCount: directives.length,
+      directiveTypes: directives.map((d) => d.type),
+    }, {
+      ok: true,
+      sessionId,
+      sessionKey,
+      projectId,
+    });
+
+    const sharedStore = new FileSharedStore({
+      storagePath: config.sharedStoragePath,
+    });
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: config.approvalLedgerPath,
+      sharedStore,
+    });
+    const promoter = new Promoter({
+      sharedStore,
+      approvalStore,
+      policy: config.promotionPolicy,
+    });
+
+    let captureCount = 0;
+    for (const directive of directives) {
+      if (directive.type !== "capture") continue;
+      if (captureCount >= MAX_CAPTURES_PER_STOP) {
+        log("debug", "stop.capture.rate_limited", {
+          captureCount,
+          maxCaptures: MAX_CAPTURES_PER_STOP,
+        }, {
+          ok: true,
+          sessionId,
+          sessionKey,
+          projectId,
+        });
+        break;
+      }
+      if (!isSharedKnowledgeKind(directive.kind) || directive.kind === "decision_record") {
+        log("debug", "stop.capture.invalid_kind", {
+          kind: directive.kind,
+        }, {
+          ok: true,
+          sessionId,
+          sessionKey,
+          projectId,
+        });
+        continue;
+      }
+      if (!directive.content || directive.content.trim().length === 0) {
+        continue;
+      }
+
+      try {
+        const result = await promoter.promoteExplicit({
+          kind: directive.kind,
+          title: deriveTitle(directive.content),
+          content: directive.content,
+          tags: [],
+          sourceProjectId: projectId,
+        });
+        if (result.ok) {
+          captureCount += 1;
+          pendingReceipt = {
+            sessionKey,
+            entryId: result.entry.id,
+            kind: "saved",
+            createdAt: result.entry.approvedAt ?? result.entry.updatedAt,
+            expiresAfterTurn: state.turnIndex + 1,
+            undoCommand: "lore no",
+          };
+          log("info", "stop.capture.completed", {
+            entryId: result.entry.id,
+            kind: directive.kind,
+            captureCount,
+          }, {
+            ok: true,
+            sessionId,
+            sessionKey,
+            projectId,
+          });
+        } else {
+          log("debug", "stop.capture.rejected", {
+            kind: directive.kind,
+            reason: result.reason,
+          }, {
+            ok: true,
+            sessionId,
+            sessionKey,
+            projectId,
+          });
+        }
+      } catch {
+        log("warn", "stop.capture.error", {
+          kind: directive.kind,
+        }, {
+          ok: false,
+          sessionId,
+          sessionKey,
+          projectId,
+          summary: "Capture directive execution failed (advisory).",
+        });
+      }
+    }
+
+    // Process approve and dismiss directives
+    for (const directive of directives) {
+      if (directive.type === "approve") {
+        const target = resolveLoreDirectiveTarget(
+          directive,
+          state.visibleItems ?? [],
+        );
+        if (!target || target.kind !== "pending_suggestion") {
+          log("debug", "stop.approve.no_target", {
+            id: directive.id,
+          }, {
+            ok: true,
+            sessionId,
+            sessionKey,
+            projectId,
+          });
+          continue;
+        }
+        try {
+          const result = await promoter.approve(target.entryId);
+          if (result.ok) {
+            pendingReceipt = {
+              sessionKey,
+              entryId: target.entryId,
+              kind: "saved",
+              createdAt: now(),
+              expiresAfterTurn: state.turnIndex + 1,
+              undoCommand: "lore no",
+            };
+            log("info", "stop.approve.completed", {
+              entryId: target.entryId,
+            }, {
+              ok: true,
+              sessionId,
+              sessionKey,
+              projectId,
+            });
+          }
+        } catch {
+          log("warn", "stop.approve.error", {
+            entryId: target.entryId,
+          }, {
+            ok: false,
+            sessionId,
+            sessionKey,
+            projectId,
+            summary: "Approve directive execution failed (advisory).",
+          });
+        }
+      }
+
+      if (directive.type === "dismiss") {
+        const target = resolveLoreDirectiveTarget(
+          directive,
+          state.visibleItems ?? [],
+        );
+        if (!target) {
+          log("debug", "stop.dismiss.no_target", {
+            id: directive.id,
+          }, {
+            ok: true,
+            sessionId,
+            sessionKey,
+            projectId,
+          });
+          continue;
+        }
+        try {
+          if (target.actionOnDismiss === "reject_pending") {
+            await promoter.reject(target.entryId, "Dismissed from conversation.");
+          } else if (target.actionOnDismiss === "demote_undo_captured") {
+            await promoter.demote(target.entryId, "User undid a saved Lore entry.");
+          } else if (target.actionOnDismiss === "suppress_project") {
+            const suppressionStore = new FileProjectSuppressionStore({
+              storagePath: `${config.sharedStoragePath.replace(/shared\.json$/, "")}suppressions.json`,
+            });
+            await suppressionStore.add({
+              entryId: target.entryId,
+              projectId: target.projectId,
+              createdAt: now(),
+              reason: "user:dismissed",
+            });
+          }
+          log("info", "stop.dismiss.completed", {
+            entryId: target.entryId,
+            action: target.actionOnDismiss,
+          }, {
+            ok: true,
+            sessionId,
+            sessionKey,
+            projectId,
+          });
+        } catch {
+          log("warn", "stop.dismiss.error", {
+            entryId: target.entryId,
+          }, {
+            ok: false,
+            sessionId,
+            sessionKey,
+            projectId,
+            summary: "Dismiss directive execution failed (advisory).",
+          });
+        }
+      }
+    }
+  }
+
   const updated = applyStopUpdate(state, parsed);
-  await writeState(updated, config.whisperStateDir, config.whisper);
+  const finalState: WhisperSessionState = {
+    ...updated,
+    activeReceipt: pendingReceipt ?? state.activeReceipt,
+    visibleItems: [],
+  };
+  await writeState(finalState, config.whisperStateDir, config.whisper);
   log("debug", "stop.state_updated", {
-    turnIndex: updated.turnIndex,
-    recentFileCount: updated.recentFiles.length,
-    recentToolCount: updated.recentToolNames.length,
+    turnIndex: finalState.turnIndex,
+    recentFileCount: finalState.recentFiles.length,
+    recentToolCount: finalState.recentToolNames.length,
+    hasActiveReceipt: finalState.activeReceipt !== undefined,
   }, {
     ok: true,
     sessionId,

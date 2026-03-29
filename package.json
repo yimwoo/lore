@@ -1,6 +1,6 @@
 {
   "name": "codex-lore",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Persistent cross-project memory for Codex — rules, decisions, and context that follow you.",
   "license": "MIT",
   "homepage": "https://github.com/yimwoo/lore",
@@ -28,7 +28,8 @@
     "skills/",
     "src/",
     "scripts/cli.ts",
-    "scripts/demo.ts"
+    "scripts/demo.ts",
+    "scripts/live-transcript-harness.ts"
   ],
   "engines": {
     "node": ">=18"
@@ -36,6 +37,7 @@
   "scripts": {
     "cli": "node --import tsx scripts/cli.ts",
     "demo": "node --import tsx scripts/demo.ts",
+    "demo:transcript": "node --import tsx scripts/live-transcript-harness.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

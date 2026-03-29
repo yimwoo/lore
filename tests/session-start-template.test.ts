@@ -23,6 +23,7 @@ const NO_CAPABILITIES: LoreCapabilities = {
   promote: false,
   demote: false,
   cliAvailable: false,
+  visibleLoreBlocks: false,
 };
 
 const RECALL_ONLY: LoreCapabilities = {
@@ -30,6 +31,7 @@ const RECALL_ONLY: LoreCapabilities = {
   promote: false,
   demote: false,
   cliAvailable: false,
+  visibleLoreBlocks: false,
 };
 
 const FULL_CAPABILITIES: LoreCapabilities = {
@@ -37,6 +39,7 @@ const FULL_CAPABILITIES: LoreCapabilities = {
   promote: true,
   demote: true,
   cliAvailable: true,
+  visibleLoreBlocks: true,
 };
 
 const CLI_ONLY: LoreCapabilities = {
@@ -44,6 +47,7 @@ const CLI_ONLY: LoreCapabilities = {
   promote: false,
   demote: false,
   cliAvailable: true,
+  visibleLoreBlocks: false,
 };
 
 describe("renderSessionStartTemplate", () => {

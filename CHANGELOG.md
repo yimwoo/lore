@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.4.1] - 2026-03-29
+
+### Added
+
+- A new live transcript harness (`npm run demo:transcript`) that runs the real Lore hook flow and prints the exact whisper payload, expected visible `[Lore · visible]` prelude, approval step, and resulting shared-knowledge state.
+- New integration coverage for the transcript harness and Stop-hook directive execution paths.
+
+### Changed
+
+- Fixed Stop-hook `[lore:capture]` execution to use the normal promoter flow, restoring validation, forbid-pattern enforcement, and ledger-first writes.
+- Tightened `LoreVisibleItem` back to the actionable surface from the approved design: pending suggestions and saved receipts only.
+- Preserved normal `[Lore]` whisper output while separating it from actionable visible-item state, and hardened micro-command targeting against stale receipt state.
+
 ## [1.4.0] - 2026-03-29
 
 ### Added

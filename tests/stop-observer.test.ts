@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ExtractionProvider } from "../src/extraction/extraction-provider";
@@ -8,14 +11,21 @@ import {
   resolveLoreDirectiveTarget,
   runStopObserver,
 } from "../src/plugin/stop-observer";
-import type { VisibleLoreItem, WhisperSessionState } from "../src/shared/types";
+import type { LoreVisibleItem, WhisperSessionState } from "../src/shared/types";
 import { resolveConfig } from "../src/config";
 
 const config = resolveConfig().whisper;
+const tempDirs: string[] = [];
 
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
+});
+
+afterEach(async () => {
+  await Promise.all(
+    tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })),
+  );
 });
 
 const makeState = (
@@ -119,7 +129,10 @@ describe("applyStopUpdate", () => {
         {
           handle: "@l1",
           entryId: "sk-0001",
-          itemType: "receipt",
+          kind: "saved_receipt",
+          entryKind: "domain_rule",
+          content: "test content",
+          actions: ["dismiss"],
           projectId: "proj-a",
           turnIndex: 3,
           actionOnDismiss: "demote_undo_captured",
@@ -199,11 +212,14 @@ describe("parseLoreDirectives", () => {
 });
 
 describe("resolveLoreDirectiveTarget", () => {
-  const visibleItems: VisibleLoreItem[] = [
+  const visibleItems: LoreVisibleItem[] = [
     {
       handle: "@l1",
       entryId: "sk-0001",
-      itemType: "receipt",
+      kind: "saved_receipt",
+      entryKind: "domain_rule",
+      content: "Always use snake_case.",
+      actions: ["dismiss"],
       projectId: "proj-a",
       turnIndex: 4,
       actionOnDismiss: "demote_undo_captured",
@@ -212,7 +228,10 @@ describe("resolveLoreDirectiveTarget", () => {
     {
       handle: "@l2",
       entryId: "sk-0002",
-      itemType: "suggested",
+      kind: "pending_suggestion",
+      entryKind: "domain_rule",
+      content: "Feature flags live in config/flags.ts.",
+      actions: ["approve", "dismiss"],
       projectId: "proj-a",
       turnIndex: 4,
       actionOnDismiss: "reject_pending",
@@ -452,5 +471,204 @@ describe("runStopObserver extraction path", () => {
     expect(lines.some((line) => line.event === "stop.extraction.done")).toBe(true);
     expect(lines.some((line) => line.event === "stop.drafts_written")).toBe(true);
     expect(lines.some((line) => line.event === "stop.completed")).toBe(true);
+  });
+});
+
+describe("runStopObserver directive execution", () => {
+  const makeTempLoreConfig = async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "lore-stop-observer-"));
+    tempDirs.push(baseDir);
+    return resolveConfig({
+      sharedStoragePath: join(baseDir, "shared.json"),
+      approvalLedgerPath: join(baseDir, "approval-ledger.json"),
+      observationDir: join(baseDir, "observations"),
+      draftDir: join(baseDir, "drafts"),
+      consolidationStatePath: join(baseDir, "consolidation-state.json"),
+      projectMemoryDir: join(baseDir, "projects"),
+      whisperStateDir: join(baseDir, "whisper-sessions"),
+    });
+  };
+
+  it("captures through the promoter flow so forbidden content is rejected and valid content is ledgered", async () => {
+    const loreConfig = await makeTempLoreConfig();
+    let finalState: WhisperSessionState | undefined;
+
+    await runStopObserver(
+      JSON.stringify({
+        session_id: "session-capture-1",
+        cwd: "/tmp/workspaces/billing-service",
+        assistant_response: [
+          "[lore:capture kind=domain_rule] main branch naming is canonical",
+          "[lore:capture kind=domain_rule] DB columns use snake_case across services.",
+        ].join("\n"),
+      }),
+      {
+        config: loreConfig,
+        readState: async () => makeState(),
+        writeState: async (state) => {
+          finalState = state;
+        },
+      },
+    );
+
+    const sharedEntries = JSON.parse(
+      await readFile(loreConfig.sharedStoragePath, "utf8"),
+    ) as Array<{ content: string; approvalStatus: string; sourceProjectIds: string[] }>;
+    expect(sharedEntries).toHaveLength(1);
+    expect(sharedEntries[0]?.content).toBe("DB columns use snake_case across services.");
+    expect(sharedEntries[0]?.approvalStatus).toBe("approved");
+    expect(sharedEntries[0]?.sourceProjectIds).toContain("billing-service");
+
+    const ledgerEntries = JSON.parse(
+      await readFile(loreConfig.approvalLedgerPath, "utf8"),
+    ) as Array<{ action: string; actor: string; actionSource: string }>;
+    expect(ledgerEntries).toHaveLength(1);
+    expect(ledgerEntries[0]).toMatchObject({
+      action: "promote",
+      actor: "user",
+      actionSource: "explicit",
+    });
+
+    expect(finalState?.activeReceipt?.entryId).toBeTruthy();
+    expect(finalState?.visibleItems).toEqual([]);
+  });
+
+  it("approves the currently visible pending suggestion and writes a receipt", async () => {
+    const loreConfig = await makeTempLoreConfig();
+    await mkdir(dirname(loreConfig.sharedStoragePath), { recursive: true });
+    await writeFile(
+      loreConfig.sharedStoragePath,
+      `${JSON.stringify([
+        {
+          id: "sk-pending-1",
+          kind: "domain_rule",
+          title: "Snake case columns",
+          content: "DB columns use snake_case across services.",
+          confidence: 0.95,
+          tags: [],
+          sourceProjectIds: ["billing-service"],
+          sourceMemoryIds: [],
+          promotionSource: "suggested",
+          createdBy: "system",
+          approvalStatus: "pending",
+          sessionCount: 3,
+          projectCount: 1,
+          lastSeenAt: "2026-03-28T20:00:00.000Z",
+          contentHash: "hash-pending-1",
+          createdAt: "2026-03-28T20:00:00.000Z",
+          updatedAt: "2026-03-28T20:00:00.000Z",
+        },
+      ], null, 2)}\n`,
+      "utf8",
+    );
+
+    let finalState: WhisperSessionState | undefined;
+    await runStopObserver(
+      JSON.stringify({
+        session_id: "session-approve-1",
+        cwd: "/tmp/workspaces/billing-service",
+        assistant_response: "[lore:approve]",
+      }),
+      {
+        config: loreConfig,
+        readState: async () =>
+          makeState({
+            visibleItems: [
+              {
+                handle: "@l1",
+                entryId: "sk-pending-1",
+                kind: "pending_suggestion",
+                entryKind: "domain_rule",
+                content: "DB columns use snake_case across services.",
+                actions: ["approve", "dismiss"],
+                projectId: "billing-service",
+                turnIndex: 3,
+                actionOnDismiss: "reject_pending",
+                actionOnApprove: "approve_pending",
+              },
+            ],
+          }),
+        writeState: async (state) => {
+          finalState = state;
+        },
+      },
+    );
+
+    const sharedEntries = JSON.parse(
+      await readFile(loreConfig.sharedStoragePath, "utf8"),
+    ) as Array<{ approvalStatus: string; approvedAt?: string }>;
+    expect(sharedEntries[0]?.approvalStatus).toBe("approved");
+    expect(sharedEntries[0]?.approvedAt).toBeTruthy();
+    expect(finalState?.activeReceipt?.entryId).toBe("sk-pending-1");
+    expect(finalState?.visibleItems).toEqual([]);
+  });
+
+  it("dismisses the currently visible pending suggestion", async () => {
+    const loreConfig = await makeTempLoreConfig();
+    await mkdir(dirname(loreConfig.sharedStoragePath), { recursive: true });
+    await writeFile(
+      loreConfig.sharedStoragePath,
+      `${JSON.stringify([
+        {
+          id: "sk-pending-1",
+          kind: "domain_rule",
+          title: "Snake case columns",
+          content: "DB columns use snake_case across services.",
+          confidence: 0.95,
+          tags: [],
+          sourceProjectIds: ["billing-service"],
+          sourceMemoryIds: [],
+          promotionSource: "suggested",
+          createdBy: "system",
+          approvalStatus: "pending",
+          sessionCount: 3,
+          projectCount: 1,
+          lastSeenAt: "2026-03-28T20:00:00.000Z",
+          contentHash: "hash-pending-1",
+          createdAt: "2026-03-28T20:00:00.000Z",
+          updatedAt: "2026-03-28T20:00:00.000Z",
+        },
+      ], null, 2)}\n`,
+      "utf8",
+    );
+
+    let finalState: WhisperSessionState | undefined;
+    await runStopObserver(
+      JSON.stringify({
+        session_id: "session-dismiss-1",
+        cwd: "/tmp/workspaces/billing-service",
+        assistant_response: "[lore:dismiss]",
+      }),
+      {
+        config: loreConfig,
+        readState: async () =>
+          makeState({
+            visibleItems: [
+              {
+                handle: "@l1",
+                entryId: "sk-pending-1",
+                kind: "pending_suggestion",
+                entryKind: "domain_rule",
+                content: "DB columns use snake_case across services.",
+                actions: ["approve", "dismiss"],
+                projectId: "billing-service",
+                turnIndex: 3,
+                actionOnDismiss: "reject_pending",
+                actionOnApprove: "approve_pending",
+              },
+            ],
+          }),
+        writeState: async (state) => {
+          finalState = state;
+        },
+      },
+    );
+
+    const sharedEntries = JSON.parse(
+      await readFile(loreConfig.sharedStoragePath, "utf8"),
+    ) as Array<{ approvalStatus: string; rejectedAt?: string }>;
+    expect(sharedEntries[0]?.approvalStatus).toBe("rejected");
+    expect(sharedEntries[0]?.rejectedAt).toBeTruthy();
+    expect(finalState?.visibleItems).toEqual([]);
   });
 });

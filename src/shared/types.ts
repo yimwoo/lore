@@ -162,6 +162,7 @@ export type LoreCapabilities = {
   promote: boolean;
   demote: boolean;
   cliAvailable: boolean;
+  visibleLoreBlocks: boolean;
 };
 
 export type SelectedEntry = {
@@ -323,6 +324,30 @@ export type VisibleLoreItem = {
   actionOnApprove: VisibleLoreItemApproveAction;
 };
 
+// --- Lore Visible Item Types (Visibility Layer v2) ---
+
+export const loreItemKinds = [
+  "pending_suggestion",
+  "saved_receipt",
+] as const;
+
+export type LoreItemKind = (typeof loreItemKinds)[number];
+
+export type LoreItemAction = "approve" | "dismiss";
+
+export type LoreVisibleItem = {
+  handle: string;
+  entryId: string;
+  kind: LoreItemKind;
+  entryKind: SharedKnowledgeKind;
+  content: string;
+  actions: readonly LoreItemAction[];
+  projectId: string;
+  turnIndex: number;
+  actionOnDismiss: VisibleLoreItemDismissAction;
+  actionOnApprove: VisibleLoreItemApproveAction;
+};
+
 export type ReceiptRecord = {
   sessionKey: string;
   entryId: string;
@@ -347,7 +372,7 @@ export type WhisperSessionState = {
   whisperHistory: WhisperRecord[];
   injectedContentHashes: string[];
   activeReceipt?: ReceiptRecord;
-  visibleItems?: VisibleLoreItem[];
+  visibleItems?: LoreVisibleItem[];
 };
 
 export const whisperLabelMap: Record<SharedKnowledgeKind, string> = {

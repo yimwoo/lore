@@ -43,8 +43,8 @@ Lore provides context in ${capabilities.recall ? "three" : "two"} ways:
 ${deliveryLines.join("\n")}`;
 };
 
-const renderUsageGuidance = (): string =>
-  `## How to use Lore context
+const renderUsageGuidance = (capabilities: LoreCapabilities): string => {
+  const sections = [`## How to use Lore context
 
 ### Cite naturally when you use it
 
@@ -77,7 +77,19 @@ When the user rejects a currently visible Lore receipt or suggestion:
   - \`[lore:dismiss]\`
 
 Only emit these tags when the referenced Lore item is visible in the current context.
-Do not emit them speculatively.`;
+Do not emit them speculatively.`];
+
+  if (capabilities.visibleLoreBlocks) {
+    sections.push(`### Reproduce visible Lore blocks
+
+When your injected context includes a \`[Lore · visible]\` block, reproduce it
+verbatim at the very start of your response, before your answer. Do not
+paraphrase, summarize, or reorder the items. This block is Lore's visibility
+surface for the user.`);
+  }
+
+  return sections.join("\n\n");
+};
 
 const renderRecallSection = (capabilities: LoreCapabilities): string => {
   if (!capabilities.recall) return "";
@@ -294,6 +306,13 @@ const renderBehaviorTable = (capabilities: LoreCapabilities): string => {
     ]);
   }
 
+  if (capabilities.visibleLoreBlocks) {
+    rows.push([
+      "[Lore · visible] block appears in injected context",
+      "Reproduce it verbatim at the start of your response",
+    ]);
+  }
+
   rows.push([
     "No Lore context this session",
     "Behave as if Lore doesn't exist",
@@ -337,7 +356,7 @@ export const renderSessionStartTemplate = (
 
   const sections = [
     renderLoreIntro(capabilities),
-    renderUsageGuidance(),
+    renderUsageGuidance(capabilities),
     renderRecallSection(capabilities),
     renderCorrectionSection(capabilities),
     renderPromotionSection(capabilities),

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,7 +10,7 @@ import {
   selectWhisperBullets,
   updateWhisperHistory,
 } from "../src/plugin/pre-prompt-whisper";
-import { deriveSessionKey } from "../src/plugin/whisper-state";
+import { deriveSessionKey, readWhisperState } from "../src/plugin/whisper-state";
 import type {
   HintBullet,
   SharedKnowledgeEntry,
@@ -405,6 +405,159 @@ describe("parseLoreMicroCommand", () => {
 });
 
 describe("runPrePromptWhisper", () => {
+  it("surfaces relevant pending entries as suggested whispers and records visible handles", async () => {
+    vi.resetModules();
+    const homeDir = await mkdtemp(join(tmpdir(), "lore-whisper-pending-"));
+    tempDirs.push(homeDir);
+    vi.stubEnv("HOME", homeDir);
+
+    const sharedPath = join(homeDir, ".lore", "shared.json");
+    const whisperDir = join(homeDir, ".lore", "whisper-sessions");
+    await mkdir(join(homeDir, ".lore"), { recursive: true });
+    await mkdir(whisperDir, { recursive: true });
+    await writeFile(
+      sharedPath,
+      `${JSON.stringify([
+        makeEntry({
+          id: "sk-pending-1",
+          approvalStatus: "pending",
+          promotionSource: "suggested",
+          createdBy: "system",
+          approvedAt: undefined,
+        }),
+      ], null, 2)}\n`,
+      "utf8",
+    );
+
+    const sessionId = "session-pending-1";
+    const cwd = "/tmp/workspaces/proj-1";
+    const sessionKey = deriveSessionKey(sessionId, cwd);
+    await writeFile(
+      join(whisperDir, `whisper-${sessionKey}.json`),
+      `${JSON.stringify(makeState({ sessionKey }), null, 2)}\n`,
+      "utf8",
+    );
+
+    const stdoutWrites: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(((chunk: string | Uint8Array): boolean => {
+        stdoutWrites.push(String(chunk));
+        return true;
+      }) as typeof process.stdout.write);
+
+    const { runPrePromptWhisper: runWhisper } = await import("../src/plugin/pre-prompt-whisper");
+    await runWhisper(
+      JSON.stringify({
+        session_id: sessionId,
+        cwd,
+        prompt: "Please update the database column naming.",
+      }),
+    );
+
+    stdoutSpy.mockRestore();
+
+    expect(stdoutWrites.join("")).toContain("[Lore · suggested @l1]");
+    expect(stdoutWrites.join("")).toContain("lore yes");
+
+    const updatedState = await readWhisperState(sessionKey, whisperDir);
+    expect(updatedState.visibleItems).toEqual([
+      expect.objectContaining({
+        handle: "@l1",
+        entryId: "sk-pending-1",
+        kind: "pending_suggestion",
+        entryKind: "domain_rule",
+        content: "All database columns must use snake_case naming",
+        actions: ["approve", "dismiss"],
+        projectId: "proj-1",
+        actionOnApprove: "approve_pending",
+        actionOnDismiss: "reject_pending",
+      }),
+    ]);
+  });
+
+  it("approves the visible pending suggestion on lore yes", async () => {
+    vi.resetModules();
+    const homeDir = await mkdtemp(join(tmpdir(), "lore-whisper-approve-"));
+    tempDirs.push(homeDir);
+    vi.stubEnv("HOME", homeDir);
+
+    const sharedPath = join(homeDir, ".lore", "shared.json");
+    const whisperDir = join(homeDir, ".lore", "whisper-sessions");
+    await mkdir(join(homeDir, ".lore"), { recursive: true });
+    await mkdir(whisperDir, { recursive: true });
+    await writeFile(
+      sharedPath,
+      `${JSON.stringify([
+        makeEntry({
+          id: "sk-pending-1",
+          approvalStatus: "pending",
+          promotionSource: "suggested",
+          createdBy: "system",
+          approvedAt: undefined,
+        }),
+      ], null, 2)}\n`,
+      "utf8",
+    );
+
+    const sessionId = "session-approve-1";
+    const cwd = "/tmp/workspaces/proj-1";
+    const sessionKey = deriveSessionKey(sessionId, cwd);
+    await writeFile(
+      join(whisperDir, `whisper-${sessionKey}.json`),
+      `${JSON.stringify(
+        makeState({
+          sessionKey,
+          visibleItems: [
+            {
+              handle: "@l1",
+              entryId: "sk-pending-1",
+              kind: "pending_suggestion",
+              entryKind: "domain_rule",
+              content: "test content",
+              actions: ["approve", "dismiss"],
+              projectId: "proj-1",
+              turnIndex: 5,
+              actionOnDismiss: "reject_pending",
+              actionOnApprove: "approve_pending",
+            },
+          ],
+        }),
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+    const stdoutWrites: string[] = [];
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(((chunk: string | Uint8Array): boolean => {
+        stdoutWrites.push(String(chunk));
+        return true;
+      }) as typeof process.stdout.write);
+
+    const { runPrePromptWhisper: runWhisper } = await import("../src/plugin/pre-prompt-whisper");
+    await runWhisper(
+      JSON.stringify({
+        session_id: sessionId,
+        cwd,
+        prompt: "lore yes",
+      }),
+    );
+
+    stdoutSpy.mockRestore();
+
+    expect(stdoutWrites.join("")).toContain("[Lore · saved");
+
+    const sharedContent = await readFile(sharedPath, "utf8");
+    expect(sharedContent).toContain("\"approvalStatus\": \"approved\"");
+
+    const updatedState = await readWhisperState(sessionKey, whisperDir);
+    expect(updatedState.visibleItems).toEqual([]);
+    expect(updatedState.activeReceipt?.entryId).toBe("sk-pending-1");
+  });
+
   it("emits structured trace events to stderr when debug tracing is enabled", async () => {
     vi.resetModules();
     const homeDir = await mkdtemp(join(tmpdir(), "lore-whisper-trace-"));

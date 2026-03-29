@@ -5,6 +5,8 @@ import { FileMemoryStore } from "../core/memory-store";
 import { buildPreTurnHint } from "../core/hint-engine";
 import { resolveConfig } from "../config";
 import type { WhisperConfig } from "../config";
+import { FileApprovalStore } from "../promotion/approval-store";
+import { Promoter } from "../promotion/promoter";
 import { deriveSessionKey, readWhisperState, writeWhisperState } from "./whisper-state";
 import {
   effectiveScore,
@@ -16,11 +18,16 @@ import {
 } from "./whisper-scorer";
 import type {
   HintBullet,
+  LoreVisibleItem,
   SharedKnowledgeEntry,
   WhisperRecord,
   WhisperSessionState,
 } from "../shared/types";
-import { whisperLabelMap } from "../shared/types";
+import { isSharedKnowledgeKind, whisperLabelMap } from "../shared/types";
+import {
+  formatForAgentContext,
+  formatForUserDisplay,
+} from "./lore-item-renderer";
 import {
   createRunId,
   debugLoggingEnabled,
@@ -106,6 +113,61 @@ const summarizeSuppressionReason = (
 };
 
 const assignVisibleHandle = (index: number): string => `@l${index + 1}`;
+
+const buildVisibleItems = (
+  bullets: WhisperBullet[],
+  projectId: string,
+  turnIndex: number,
+): LoreVisibleItem[] =>
+  bullets
+    .filter(
+      (bullet): bullet is WhisperBullet & { entryId: string } =>
+        typeof bullet.entryId === "string" &&
+        isSharedKnowledgeKind(bullet.kind) &&
+        bullet.displayMode === "suggested",
+    )
+    .map((bullet) => ({
+      handle: bullet.handle ?? "",
+      entryId: bullet.entryId,
+      kind: "pending_suggestion" as const,
+      entryKind: bullet.kind as import("../shared/types").SharedKnowledgeKind,
+      content: bullet.text,
+      actions: ["approve", "dismiss"] as const,
+      projectId,
+      turnIndex,
+      actionOnDismiss: "reject_pending" as const,
+      actionOnApprove: "approve_pending" as const,
+    }));
+
+const findMicroCommandTarget = (
+  command: LoreMicroCommand,
+  state: WhisperSessionState,
+): LoreVisibleItem | null => {
+  if (command.target) {
+    return (
+      state.visibleItems?.find((item) => item.handle === command.target) ?? null
+    );
+  }
+
+  // Bare dismiss: receipt wins over suggestion
+  if (command.action === "dismiss") {
+    const receipt = state.visibleItems?.find(
+      (item) => item.kind === "saved_receipt",
+    );
+    if (receipt) return receipt;
+  }
+
+  // Bare approve or fallback dismiss: first pending suggestion
+  return (
+    state.visibleItems?.find((item) => item.kind === "pending_suggestion") ?? null
+  );
+};
+
+const formatSavedReceipt = (
+  handle: string,
+  entry: SharedKnowledgeEntry,
+): string =>
+  `[Lore · saved ${handle}]\n- **${whisperLabelMap[entry.kind]}**: ${entry.content} (\`lore no\` to undo)`;
 
 export const parseLoreMicroCommand = (
   promptText: string,
@@ -422,18 +484,184 @@ export const runPrePromptWhisper = async (
     projectId,
   });
 
+  // Receipt expiry check: clear stale receipts before building items
+  const activeReceipt =
+    state.activeReceipt &&
+    state.turnIndex <= state.activeReceipt.expiresAfterTurn
+      ? state.activeReceipt
+      : undefined;
+
   const sharedStore = new FileSharedStore({
     storagePath: config.sharedStoragePath,
   });
-  const sharedEntries = await sharedStore.list({ approvalStatus: "approved" });
+  const approvalStore = new FileApprovalStore({
+    ledgerPath: config.approvalLedgerPath,
+    sharedStore,
+  });
+  const promoter = new Promoter({
+    sharedStore,
+    approvalStore,
+    policy: config.promotionPolicy,
+  });
+  const [approvedEntries, pendingEntries] = await Promise.all([
+    sharedStore.list({ approvalStatus: "approved" }),
+    sharedStore.list({ approvalStatus: "pending" }),
+  ]);
+  const sharedEntries = [...approvedEntries, ...pendingEntries];
   log("debug", "whisper.shared_loaded", {
     sharedEntryCount: sharedEntries.length,
+    approvedCount: approvedEntries.length,
+    pendingCount: pendingEntries.length,
   }, {
     ok: true,
     sessionId,
     sessionKey,
     projectId,
   });
+
+  const microCommand = parseLoreMicroCommand(promptText);
+  if (microCommand) {
+    const currentState: WhisperSessionState = {
+      ...state,
+      activeReceipt,
+      visibleItems: (state.visibleItems ?? []).filter((item) =>
+        item.kind === "pending_suggestion" ||
+        (item.kind === "saved_receipt" && activeReceipt?.entryId === item.entryId),
+      ),
+    };
+    const target = findMicroCommandTarget(microCommand, currentState);
+    if (!target) {
+      log("debug", "whisper.micro_command_ignored", {
+        action: microCommand.action,
+        reason: "no_visible_target",
+      }, {
+        ok: true,
+        sessionId,
+        sessionKey,
+        projectId,
+      });
+      return;
+    }
+
+    if (microCommand.action === "approve" && target.kind === "pending_suggestion") {
+      const result = await promoter.approve(target.entryId);
+      if (!result.ok) {
+        log("warn", "whisper.micro_command_failed", {
+          action: microCommand.action,
+          entryId: target.entryId,
+          reason: result.reason,
+        }, {
+          ok: false,
+          sessionId,
+          sessionKey,
+          projectId,
+          summary: "Lore approval micro-command failed.",
+        });
+        return;
+      }
+
+      const nextState: WhisperSessionState = {
+        ...state,
+        activeReceipt: {
+          sessionKey,
+          entryId: result.entry.id,
+          kind: "saved",
+          createdAt: result.entry.approvedAt ?? new Date().toISOString(),
+          expiresAfterTurn: state.turnIndex + 1,
+          undoCommand: "lore no",
+        },
+        visibleItems: [],
+      };
+      await writeWhisperState(nextState, config.whisperStateDir, config.whisper);
+      process.stdout.write(`${formatSavedReceipt(target.handle, result.entry)}\n`);
+      log("info", "whisper.micro_command_completed", {
+        action: microCommand.action,
+        entryId: result.entry.id,
+      }, {
+        ok: true,
+        sessionId,
+        sessionKey,
+        projectId,
+        summary: "Lore approval micro-command completed.",
+      });
+      return;
+    }
+
+    if (microCommand.action === "dismiss" && target.kind === "pending_suggestion") {
+      const result = await promoter.reject(
+        target.entryId,
+        "Dismissed from Lore suggestion.",
+      );
+      if (!result.ok) {
+        log("warn", "whisper.micro_command_failed", {
+          action: microCommand.action,
+          entryId: target.entryId,
+          reason: result.reason,
+        }, {
+          ok: false,
+          sessionId,
+          sessionKey,
+          projectId,
+          summary: "Lore dismiss micro-command failed.",
+        });
+        return;
+      }
+
+      await writeWhisperState({
+        ...state,
+        visibleItems: [],
+      }, config.whisperStateDir, config.whisper);
+      log("info", "whisper.micro_command_completed", {
+        action: microCommand.action,
+        entryId: result.entry.id,
+      }, {
+        ok: true,
+        sessionId,
+        sessionKey,
+        projectId,
+        summary: "Lore dismiss micro-command completed.",
+      });
+      return;
+    }
+
+    if (microCommand.action === "dismiss" && target.kind === "saved_receipt") {
+      const result = await promoter.demote(
+        target.entryId,
+        "User undid a saved Lore entry.",
+      );
+      if (!result.ok) {
+        log("warn", "whisper.micro_command_failed", {
+          action: microCommand.action,
+          entryId: target.entryId,
+          reason: result.reason,
+        }, {
+          ok: false,
+          sessionId,
+          sessionKey,
+          projectId,
+          summary: "Lore undo micro-command failed.",
+        });
+        return;
+      }
+
+      await writeWhisperState({
+        ...state,
+        activeReceipt: undefined,
+        visibleItems: [],
+      }, config.whisperStateDir, config.whisper);
+      log("info", "whisper.micro_command_completed", {
+        action: microCommand.action,
+        entryId: result.entry.id,
+      }, {
+        ok: true,
+        sessionId,
+        sessionKey,
+        projectId,
+        summary: "Lore undo micro-command completed.",
+      });
+      return;
+    }
+  }
 
   // Build hint bullets from project memories
   let hintBullets: HintBullet[] = [];
@@ -489,11 +717,63 @@ export const runPrePromptWhisper = async (
     projectId,
   });
 
-  const output = formatWhisper(bullets);
+  // Build LoreVisibleItem[] from scored bullets
+  const loreItems = buildVisibleItems(bullets, projectId, state.turnIndex);
+
+  // Construct receipt LoreVisibleItem and prepend if active
+  if (activeReceipt) {
+    const receiptEntry = sharedEntries.find(
+      (entry) => entry.id === activeReceipt.entryId,
+    );
+    if (receiptEntry) {
+      loreItems.unshift({
+        handle: "",
+        entryId: receiptEntry.id,
+        kind: "saved_receipt",
+        entryKind: receiptEntry.kind,
+        content: receiptEntry.content,
+        actions: ["dismiss"],
+        projectId,
+        turnIndex: state.turnIndex,
+        actionOnDismiss: "demote_undo_captured",
+        actionOnApprove: "approve_pending",
+      });
+    }
+  }
+
+  // Assign turn-local handles: receipt first (@l1), then suggestions
+  let handleIndex = activeReceipt ? 1 : 0;
+  for (const bullet of bullets) {
+    if (bullet.displayMode === "suggested") {
+      bullet.handle = assignVisibleHandle(handleIndex);
+      handleIndex += 1;
+    }
+  }
+  handleIndex = 0;
+  for (const item of loreItems) {
+    if (item.kind === "pending_suggestion" || item.kind === "saved_receipt") {
+      item.handle = assignVisibleHandle(handleIndex);
+      handleIndex += 1;
+    }
+  }
+
+  // Render both outputs
+  const standardAgentContext = formatWhisper(
+    bullets.filter((bullet) => bullet.displayMode !== "suggested"),
+  );
+  const actionableAgentContext = formatForAgentContext(loreItems);
+  const userDisplay = formatForUserDisplay(loreItems);
+  const output = [
+    standardAgentContext,
+    actionableAgentContext,
+    userDisplay,
+  ].filter(Boolean).join("\n\n");
+
   if (output) {
     process.stdout.write(output + "\n");
     log("info", "whisper.output_written", {
       bulletCount: bullets.length,
+      loreItemCount: loreItems.length,
       outputLength: output.length,
     }, {
       ok: true,
@@ -534,14 +814,22 @@ export const runPrePromptWhisper = async (
       durationMs: Date.now() - startedAt,
       summary: "No whisper output was emitted for this prompt.",
     });
+    await writeWhisperState({
+      ...state,
+      visibleItems: [],
+    }, config.whisperStateDir, config.whisper);
   }
 
   // Record whisper decisions
   if (bullets.length > 0) {
-    const updatedState = updateWhisperHistory(state, bullets);
+    const updatedState: WhisperSessionState = {
+      ...updateWhisperHistory(state, bullets),
+      visibleItems: loreItems,
+    };
     await writeWhisperState(updatedState, config.whisperStateDir, config.whisper);
     log("trace", "whisper.state_updated", {
       whisperHistoryCount: updatedState.whisperHistory.length,
+      visibleItemCount: updatedState.visibleItems?.length ?? 0,
     }, {
       ok: true,
       sessionId,

@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.6.0] - 2026-03-29
+
+### Added
+
+- **Semantic deduplication (Tier 2)** — Write-time dedup using Elasticsearch-style fingerprinting (tokenize, normalize, sort, hash) combined with token-set Jaccard similarity. Near-duplicates (Jaccard >= 0.85) are auto-filtered during consolidation. Candidate duplicates (>= 0.65) are forwarded to the LLM consolidator as pairs. New `normalizedHash` field on `SharedKnowledgeEntry`.
+- **Conflict detection pipeline** — Pure NegEx-adapted polarity detector with 5-step decision tree classifying conflicts as direct negation, scope mismatch, temporal supersession, specialization, or ambiguous. Runs as a post-step in the consolidator. Updates `contradictionCount` on affected entries.
+- **Conflict resolution CLI** — `lore resolve <idA> <idB>` with four actions: `--keep <id>`, `--dismiss <id>`, `--scope <id> --project <name>`, `--merge`. New `"resolve"` ledger action.
+- **Supersession chains** — `lore history <id>` traces the chain of entries that superseded each other. New `SupersessionReason` taxonomy.
+- **`[Lore · conflict detected]` block** in SessionStart template — surfaces the highest-priority unresolved conflict (at most one per session) with resolution guidance.
+- **Conflict store** — `FileConflictStore` at `~/.lore/conflicts.json` with atomic writes.
+- New pure modules: `src/shared/semantic-normalizer.ts`, `src/promotion/conflict-detector.ts`.
+- 100+ new tests across 4 new test files.
+
 ## [1.5.0] - 2026-03-29
 
 ### Added

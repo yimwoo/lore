@@ -42,6 +42,7 @@ export type LoreConfig = {
   sessionStart: SessionStartConfig;
   whisper: WhisperConfig;
   promotionPolicy: Record<SharedKnowledgeKind, PromotionCriteria>;
+  conflictStoragePath: string;
   staleDaysThreshold: number;
 };
 
@@ -156,6 +157,8 @@ export const resolveConfig = (
     sessionStart: overrides?.sessionStart ?? { ...defaultSessionStartConfig },
     whisper: overrides?.whisper ?? { ...defaultWhisperConfig },
     promotionPolicy: overrides?.promotionPolicy ?? defaultPromotionPolicy,
+    conflictStoragePath:
+      overrides?.conflictStoragePath ?? join(baseDir, "conflicts.json"),
     staleDaysThreshold: overrides?.staleDaysThreshold ?? 60,
   };
 };

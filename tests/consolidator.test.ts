@@ -8,10 +8,12 @@ import { DraftStoreWriter, readConsolidationState } from "../src/promotion/draft
 import { ObservationLogWriter } from "../src/promotion/observation-log";
 import { FileApprovalStore } from "../src/promotion/approval-store";
 import { Consolidator } from "../src/promotion/consolidator";
+import { FileConflictStore } from "../src/promotion/conflict-store";
 import type { ConsolidationProvider } from "../src/extraction/consolidation-provider";
 import { DraftStoreReader } from "../src/promotion/draft-store";
 import { ObservationLogReader } from "../src/promotion/observation-log";
 import type { DraftCandidate, SharedKnowledgeEntry } from "../src/shared/types";
+import { computeNormalizedHash } from "../src/shared/semantic-normalizer";
 import { contentHash } from "../src/shared/validators";
 
 let testDir: string;
@@ -480,5 +482,796 @@ describe("Consolidator", () => {
     const pending = await sharedStore.list({ approvalStatus: "pending" });
     expect(approved).toHaveLength(3);
     expect(pending).toHaveLength(1);
+  });
+});
+
+describe("conflict detection post-step", () => {
+  it("detects a conflict between a new entry and an existing approved entry", async () => {
+    const draftDir = join(testDir, "drafts");
+    const observationDir = join(testDir, "observations");
+    const sharedStore = new FileSharedStore({
+      storagePath: join(testDir, "shared.json"),
+      now: makeTimestamp,
+      createId: () => `sk-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: join(testDir, "approval-ledger.json"),
+      sharedStore,
+      now: makeTimestamp,
+      createId: () => `ledger-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const conflictStore = new FileConflictStore({
+      storagePath: join(testDir, "conflicts.json"),
+      now: makeTimestamp,
+      createId: () => `conf-${String(idCounter++).padStart(4, "0")}`,
+    });
+
+    // Pre-existing approved entry
+    const existingEntry = makePendingEntry({
+      id: "sk-existing",
+      content: "Always use snake_case for DB columns",
+      contentHash: contentHash("Always use snake_case for DB columns"),
+      approvalStatus: "approved",
+      approvedAt: "2026-03-28T19:00:00Z",
+    });
+    await sharedStore.save(existingEntry);
+
+    // Draft that will be consolidated into a contradictory approved entry
+    const draft = makeDraft({
+      content: "Never use snake_case for DB columns",
+      title: "Contradictory rule",
+    });
+    await new DraftStoreWriter({ draftDir, sessionId: "session-1" }).append(draft);
+
+    const observationWriter = new ObservationLogWriter({
+      observationDir,
+      sessionId: "session-1",
+    });
+    for (const [sessionId, contextKey] of [
+      ["session-1", "file:db/schema"],
+      ["session-2", "tool:psql"],
+      ["session-3", "prompt:naming"],
+    ] as const) {
+      await observationWriter.append({
+        sessionId,
+        projectId: "proj-1",
+        contentHash: contentHash(draft.content),
+        kind: "reminder",
+        confidence: 0.95,
+        timestamp: draft.timestamp,
+        contextKey,
+      });
+    }
+
+    const provider: ConsolidationProvider = {
+      consolidate: async () => ({
+        entries: [
+          {
+            entry: makePendingEntry({
+              id: "",
+              kind: "domain_rule",
+              title: draft.title,
+              content: draft.content,
+              contentHash: contentHash(draft.content),
+              approvalStatus: "approved",
+              approvalSource: "auto:convergence",
+              approvedAt: makeTimestamp(),
+              sessionCount: 3,
+            }),
+            consumedEntryIds: [],
+          },
+        ],
+      }),
+    };
+
+    const consolidator = new Consolidator({
+      draftReader: new DraftStoreReader({ draftDir }),
+      observationReader: new ObservationLogReader({ observationDir }),
+      sharedStore,
+      approvalStore,
+      conflictStore,
+      provider,
+      statePath: join(testDir, "consolidation-state.json"),
+      now: makeTimestamp,
+    });
+
+    const result = await consolidator.run();
+    expect(result.ok).toBe(true);
+
+    const conflicts = await conflictStore.list({ status: "open" });
+    expect(conflicts.length).toBeGreaterThanOrEqual(1);
+    const conflict = conflicts[0]!;
+    expect(conflict.conflictType).toBe("direct_negation");
+  });
+
+  it("updates contradictionCount on both entries when conflict detected", async () => {
+    const draftDir = join(testDir, "drafts");
+    const observationDir = join(testDir, "observations");
+    const sharedStore = new FileSharedStore({
+      storagePath: join(testDir, "shared.json"),
+      now: makeTimestamp,
+      createId: () => `sk-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: join(testDir, "approval-ledger.json"),
+      sharedStore,
+      now: makeTimestamp,
+      createId: () => `ledger-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const conflictStore = new FileConflictStore({
+      storagePath: join(testDir, "conflicts.json"),
+      now: makeTimestamp,
+      createId: () => `conf-${String(idCounter++).padStart(4, "0")}`,
+    });
+
+    const existingEntry = makePendingEntry({
+      id: "sk-exist",
+      content: "Always use snake_case for DB columns",
+      contentHash: contentHash("Always use snake_case for DB columns"),
+      approvalStatus: "approved",
+      contradictionCount: 0,
+    });
+    await sharedStore.save(existingEntry);
+
+    const draft = makeDraft({
+      content: "Never use snake_case for DB columns",
+      title: "Contradictory rule",
+    });
+    await new DraftStoreWriter({ draftDir, sessionId: "session-1" }).append(draft);
+
+    const provider: ConsolidationProvider = {
+      consolidate: async () => ({
+        entries: [
+          {
+            entry: makePendingEntry({
+              id: "",
+              kind: "domain_rule",
+              title: draft.title,
+              content: draft.content,
+              contentHash: contentHash(draft.content),
+              approvalStatus: "approved",
+              contradictionCount: 0,
+              sessionCount: 1,
+            }),
+            consumedEntryIds: [],
+          },
+        ],
+      }),
+    };
+
+    const consolidator = new Consolidator({
+      draftReader: new DraftStoreReader({ draftDir }),
+      observationReader: new ObservationLogReader({ observationDir }),
+      sharedStore,
+      approvalStore,
+      conflictStore,
+      provider,
+      statePath: join(testDir, "consolidation-state.json"),
+      now: makeTimestamp,
+    });
+
+    await consolidator.run();
+
+    const existing = await sharedStore.getById("sk-exist");
+    expect(existing!.contradictionCount).toBe(1);
+
+    // The new entry also has its contradictionCount incremented
+    const allApproved = await sharedStore.list({ approvalStatus: "approved" });
+    const newEntry = allApproved.find((e) => e.id !== "sk-exist");
+    expect(newEntry!.contradictionCount).toBe(1);
+  });
+
+  it("skips specialization conflicts (disjoint scopes)", async () => {
+    const draftDir = join(testDir, "drafts");
+    const observationDir = join(testDir, "observations");
+    const sharedStore = new FileSharedStore({
+      storagePath: join(testDir, "shared.json"),
+      now: makeTimestamp,
+      createId: () => `sk-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: join(testDir, "approval-ledger.json"),
+      sharedStore,
+      now: makeTimestamp,
+      createId: () => `ledger-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const conflictStore = new FileConflictStore({
+      storagePath: join(testDir, "conflicts.json"),
+      now: makeTimestamp,
+      createId: () => `conf-${String(idCounter++).padStart(4, "0")}`,
+    });
+
+    // Existing entry with DB scope
+    const existingEntry = makePendingEntry({
+      id: "sk-db",
+      content: "Use snake_case for DB columns",
+      contentHash: contentHash("Use snake_case for DB columns"),
+      approvalStatus: "approved",
+    });
+    await sharedStore.save(existingEntry);
+
+    // New entry with API scope -- disjoint from DB scope
+    const draft = makeDraft({
+      content: "Never use snake_case for API fields",
+      title: "API rule",
+    });
+    await new DraftStoreWriter({ draftDir, sessionId: "session-1" }).append(draft);
+
+    const provider: ConsolidationProvider = {
+      consolidate: async () => ({
+        entries: [
+          {
+            entry: makePendingEntry({
+              id: "",
+              kind: "domain_rule",
+              title: draft.title,
+              content: draft.content,
+              contentHash: contentHash(draft.content),
+              approvalStatus: "approved",
+              sessionCount: 1,
+            }),
+            consumedEntryIds: [],
+          },
+        ],
+      }),
+    };
+
+    const consolidator = new Consolidator({
+      draftReader: new DraftStoreReader({ draftDir }),
+      observationReader: new ObservationLogReader({ observationDir }),
+      sharedStore,
+      approvalStore,
+      conflictStore,
+      provider,
+      statePath: join(testDir, "consolidation-state.json"),
+      now: makeTimestamp,
+    });
+
+    await consolidator.run();
+
+    const conflicts = await conflictStore.list();
+    expect(conflicts).toHaveLength(0);
+  });
+
+  it("does not create duplicate conflicts on re-consolidation", async () => {
+    const draftDir = join(testDir, "drafts");
+    const observationDir = join(testDir, "observations");
+    const sharedStore = new FileSharedStore({
+      storagePath: join(testDir, "shared.json"),
+      now: makeTimestamp,
+      createId: () => `sk-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: join(testDir, "approval-ledger.json"),
+      sharedStore,
+      now: makeTimestamp,
+      createId: () => `ledger-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const conflictStore = new FileConflictStore({
+      storagePath: join(testDir, "conflicts.json"),
+      now: makeTimestamp,
+      createId: () => `conf-${String(idCounter++).padStart(4, "0")}`,
+    });
+
+    const existingEntry = makePendingEntry({
+      id: "sk-old",
+      content: "Always use snake_case for DB columns",
+      contentHash: contentHash("Always use snake_case for DB columns"),
+      approvalStatus: "approved",
+    });
+    await sharedStore.save(existingEntry);
+
+    const newEntry = makePendingEntry({
+      id: "sk-new",
+      content: "Never use snake_case for DB columns",
+      contentHash: contentHash("Never use snake_case for DB columns"),
+      approvalStatus: "approved",
+    });
+    await sharedStore.save(newEntry);
+
+    // Pre-existing conflict
+    await conflictStore.add({
+      entryIdA: "sk-new",
+      entryIdB: "sk-old",
+      conflictType: "direct_negation",
+      subjectOverlap: 1.0,
+      scopeOverlap: 1.0,
+      suggestedWinnerId: "sk-new",
+      explanation: "Already detected",
+    });
+
+    const draft = makeDraft({
+      content: "Never use snake_case for DB columns",
+      title: "Same contradictory rule again",
+    });
+    await new DraftStoreWriter({ draftDir, sessionId: "session-2" }).append(draft);
+
+    const provider: ConsolidationProvider = {
+      consolidate: async () => ({
+        entries: [
+          {
+            entry: {
+              ...newEntry,
+              updatedAt: makeTimestamp(),
+            },
+            consumedEntryIds: [],
+          },
+        ],
+      }),
+    };
+
+    const consolidator = new Consolidator({
+      draftReader: new DraftStoreReader({ draftDir }),
+      observationReader: new ObservationLogReader({ observationDir }),
+      sharedStore,
+      approvalStore,
+      conflictStore,
+      provider,
+      statePath: join(testDir, "consolidation-state.json"),
+      now: makeTimestamp,
+    });
+
+    await consolidator.run();
+
+    const conflicts = await conflictStore.list();
+    const matchingPairs = conflicts.filter(
+      (c) =>
+        (c.entryIdA === "sk-new" && c.entryIdB === "sk-old") ||
+        (c.entryIdA === "sk-old" && c.entryIdB === "sk-new"),
+    );
+    expect(matchingPairs).toHaveLength(1);
+  });
+
+  it("skips different kinds", async () => {
+    const draftDir = join(testDir, "drafts");
+    const observationDir = join(testDir, "observations");
+    const sharedStore = new FileSharedStore({
+      storagePath: join(testDir, "shared.json"),
+      now: makeTimestamp,
+      createId: () => `sk-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: join(testDir, "approval-ledger.json"),
+      sharedStore,
+      now: makeTimestamp,
+      createId: () => `ledger-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const conflictStore = new FileConflictStore({
+      storagePath: join(testDir, "conflicts.json"),
+      now: makeTimestamp,
+      createId: () => `conf-${String(idCounter++).padStart(4, "0")}`,
+    });
+
+    const existingEntry = makePendingEntry({
+      id: "sk-rule",
+      kind: "glossary_term",
+      content: "Always use snake_case for DB columns",
+      contentHash: contentHash("Always use snake_case for DB columns"),
+      approvalStatus: "approved",
+    });
+    await sharedStore.save(existingEntry);
+
+    const draft = makeDraft({
+      kind: "domain_rule",
+      content: "Never use snake_case for DB columns",
+      title: "Different kind",
+    });
+    await new DraftStoreWriter({ draftDir, sessionId: "session-1" }).append(draft);
+
+    const provider: ConsolidationProvider = {
+      consolidate: async () => ({
+        entries: [
+          {
+            entry: makePendingEntry({
+              id: "",
+              kind: "domain_rule",
+              title: draft.title,
+              content: draft.content,
+              contentHash: contentHash(draft.content),
+              approvalStatus: "approved",
+              sessionCount: 1,
+            }),
+            consumedEntryIds: [],
+          },
+        ],
+      }),
+    };
+
+    const consolidator = new Consolidator({
+      draftReader: new DraftStoreReader({ draftDir }),
+      observationReader: new ObservationLogReader({ observationDir }),
+      sharedStore,
+      approvalStore,
+      conflictStore,
+      provider,
+      statePath: join(testDir, "consolidation-state.json"),
+      now: makeTimestamp,
+    });
+
+    await consolidator.run();
+
+    const conflicts = await conflictStore.list();
+    expect(conflicts).toHaveLength(0);
+  });
+});
+describe("semantic dedup pre-step", () => {
+  it("filters exact normalized duplicate of existing approved entry", async () => {
+    const draftDir = join(testDir, "drafts");
+    const observationDir = join(testDir, "observations");
+    const sharedStore = new FileSharedStore({
+      storagePath: join(testDir, "shared.json"),
+      now: makeTimestamp,
+      createId: () => `sk-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: join(testDir, "approval-ledger.json"),
+      sharedStore,
+      now: makeTimestamp,
+      createId: () => `ledger-${String(idCounter++).padStart(4, "0")}`,
+    });
+
+    // Create an existing approved entry
+    const existingEntry = makePendingEntry({
+      id: "sk-approved-1",
+      content: "Always use snake_case for columns",
+      contentHash: contentHash("Always use snake_case for columns"),
+      approvalStatus: "approved",
+      approvedAt: "2026-03-28T19:00:00Z",
+    });
+    await sharedStore.save(existingEntry);
+
+    // Create a draft with semantically equivalent content (different imperative verb)
+    const draft = makeDraft({
+      content: "Must use snake_case for columns",
+    });
+    await new DraftStoreWriter({ draftDir, sessionId: "session-1" }).append(draft);
+
+    let providerCalledWithDrafts: DraftCandidate[] = [];
+    const provider: ConsolidationProvider = {
+      consolidate: async (input) => {
+        providerCalledWithDrafts = input.drafts;
+        return { entries: [] };
+      },
+    };
+
+    const consolidator = new Consolidator({
+      draftReader: new DraftStoreReader({ draftDir }),
+      observationReader: new ObservationLogReader({ observationDir }),
+      sharedStore,
+      approvalStore,
+      provider,
+      statePath: join(testDir, "consolidation-state.json"),
+      now: makeTimestamp,
+    });
+
+    const result = await consolidator.run();
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.mergedEntryIds).toContain(draft.id);
+      // Provider should not be called since all drafts were deduped
+      expect(providerCalledWithDrafts).toHaveLength(0);
+    }
+  });
+
+  it("passes candidate pairs to provider for Jaccard >= 0.65 matches", async () => {
+    const draftDir = join(testDir, "drafts");
+    const observationDir = join(testDir, "observations");
+    const sharedStore = new FileSharedStore({
+      storagePath: join(testDir, "shared.json"),
+      now: makeTimestamp,
+      createId: () => `sk-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: join(testDir, "approval-ledger.json"),
+      sharedStore,
+      now: makeTimestamp,
+      createId: () => `ledger-${String(idCounter++).padStart(4, "0")}`,
+    });
+
+    // Create an existing approved entry
+    const existingEntry = makePendingEntry({
+      id: "sk-approved-1",
+      content: "enable strict typescript eslint prettier",
+      contentHash: contentHash("enable strict typescript eslint prettier"),
+      approvalStatus: "approved",
+      approvedAt: "2026-03-28T19:00:00Z",
+    });
+    await sharedStore.save(existingEntry);
+
+    // Draft with candidate-level similarity (4/6 Jaccard)
+    const draft = makeDraft({
+      content: "enable strict typescript eslint linting",
+    });
+    await new DraftStoreWriter({ draftDir, sessionId: "session-1" }).append(draft);
+
+    let receivedCandidatePairs: Array<{ draftId: string; existingEntryId: string; similarity: number }> = [];
+    const provider: ConsolidationProvider = {
+      consolidate: async (input) => {
+        receivedCandidatePairs = input.candidatePairs ?? [];
+        return {
+          entries: input.drafts.map((d) => ({
+            entry: makePendingEntry({
+              id: "",
+              title: d.title,
+              content: d.content,
+              contentHash: contentHash(d.content),
+            }),
+            consumedEntryIds: [],
+          })),
+        };
+      },
+    };
+
+    const consolidator = new Consolidator({
+      draftReader: new DraftStoreReader({ draftDir }),
+      observationReader: new ObservationLogReader({ observationDir }),
+      sharedStore,
+      approvalStore,
+      provider,
+      statePath: join(testDir, "consolidation-state.json"),
+      now: makeTimestamp,
+    });
+
+    const result = await consolidator.run();
+    expect(result.ok).toBe(true);
+    expect(receivedCandidatePairs).toHaveLength(1);
+    expect(receivedCandidatePairs[0]!.draftId).toBe(draft.id);
+    expect(receivedCandidatePairs[0]!.existingEntryId).toBe("sk-approved-1");
+    expect(receivedCandidatePairs[0]!.similarity).toBeGreaterThanOrEqual(0.65);
+  });
+
+  it("returns early without calling provider when all drafts are duplicates", async () => {
+    const draftDir = join(testDir, "drafts");
+    const observationDir = join(testDir, "observations");
+    const sharedStore = new FileSharedStore({
+      storagePath: join(testDir, "shared.json"),
+      now: makeTimestamp,
+      createId: () => `sk-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: join(testDir, "approval-ledger.json"),
+      sharedStore,
+      now: makeTimestamp,
+      createId: () => `ledger-${String(idCounter++).padStart(4, "0")}`,
+    });
+
+    const existingEntry = makePendingEntry({
+      id: "sk-approved-1",
+      content: "Always use snake_case for columns",
+      contentHash: contentHash("Always use snake_case for columns"),
+      approvalStatus: "approved",
+    });
+    await sharedStore.save(existingEntry);
+
+    const draft1 = makeDraft({
+      id: "draft-dup-1",
+      content: "Must use snake_case for columns",
+    });
+    const draft2 = makeDraft({
+      id: "draft-dup-2",
+      content: "Should use snake_case for columns",
+    });
+    const draftWriter = new DraftStoreWriter({ draftDir, sessionId: "session-1" });
+    await draftWriter.append(draft1);
+    await draftWriter.append(draft2);
+
+    let providerCalled = false;
+    const provider: ConsolidationProvider = {
+      consolidate: async () => {
+        providerCalled = true;
+        return { entries: [] };
+      },
+    };
+
+    const consolidator = new Consolidator({
+      draftReader: new DraftStoreReader({ draftDir }),
+      observationReader: new ObservationLogReader({ observationDir }),
+      sharedStore,
+      approvalStore,
+      provider,
+      statePath: join(testDir, "consolidation-state.json"),
+      now: makeTimestamp,
+    });
+
+    const result = await consolidator.run();
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.savedEntryIds).toHaveLength(0);
+      expect(result.mergedEntryIds).toContain("draft-dup-1");
+      expect(result.mergedEntryIds).toContain("draft-dup-2");
+    }
+    expect(providerCalled).toBe(false);
+  });
+
+  it("passes only unique drafts to provider in a mixed batch", async () => {
+    const draftDir = join(testDir, "drafts");
+    const observationDir = join(testDir, "observations");
+    const sharedStore = new FileSharedStore({
+      storagePath: join(testDir, "shared.json"),
+      now: makeTimestamp,
+      createId: () => `sk-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: join(testDir, "approval-ledger.json"),
+      sharedStore,
+      now: makeTimestamp,
+      createId: () => `ledger-${String(idCounter++).padStart(4, "0")}`,
+    });
+
+    const existingEntry = makePendingEntry({
+      id: "sk-approved-1",
+      content: "Always use snake_case for columns",
+      contentHash: contentHash("Always use snake_case for columns"),
+      approvalStatus: "approved",
+    });
+    await sharedStore.save(existingEntry);
+
+    const dupDraft = makeDraft({
+      id: "draft-dup",
+      content: "Must use snake_case for columns",
+    });
+    const uniqueDraft = makeDraft({
+      id: "draft-unique",
+      content: "Enable connection pooling for PostgreSQL production databases",
+    });
+    const draftWriter = new DraftStoreWriter({ draftDir, sessionId: "session-1" });
+    await draftWriter.append(dupDraft);
+    await draftWriter.append(uniqueDraft);
+
+    let providerDrafts: DraftCandidate[] = [];
+    const provider: ConsolidationProvider = {
+      consolidate: async (input) => {
+        providerDrafts = input.drafts;
+        return {
+          entries: input.drafts.map((d) => ({
+            entry: makePendingEntry({
+              id: "",
+              title: d.title,
+              content: d.content,
+              contentHash: contentHash(d.content),
+            }),
+            consumedEntryIds: [],
+          })),
+        };
+      },
+    };
+
+    const consolidator = new Consolidator({
+      draftReader: new DraftStoreReader({ draftDir }),
+      observationReader: new ObservationLogReader({ observationDir }),
+      sharedStore,
+      approvalStore,
+      provider,
+      statePath: join(testDir, "consolidation-state.json"),
+      now: makeTimestamp,
+    });
+
+    const result = await consolidator.run();
+    expect(result.ok).toBe(true);
+    expect(providerDrafts).toHaveLength(1);
+    expect(providerDrafts[0]!.id).toBe("draft-unique");
+    if (result.ok) {
+      expect(result.mergedEntryIds).toContain("draft-dup");
+    }
+  });
+
+  it("deduplicates intra-batch drafts with the same normalized hash", async () => {
+    const draftDir = join(testDir, "drafts");
+    const observationDir = join(testDir, "observations");
+    const sharedStore = new FileSharedStore({
+      storagePath: join(testDir, "shared.json"),
+      now: makeTimestamp,
+      createId: () => `sk-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: join(testDir, "approval-ledger.json"),
+      sharedStore,
+      now: makeTimestamp,
+      createId: () => `ledger-${String(idCounter++).padStart(4, "0")}`,
+    });
+
+    // Two drafts with same normalized hash, no existing entries
+    const draft1 = makeDraft({
+      id: "draft-intra-1",
+      content: "Always use snake_case for columns",
+    });
+    const draft2 = makeDraft({
+      id: "draft-intra-2",
+      content: "Must use snake_case for columns",
+    });
+    const draftWriter = new DraftStoreWriter({ draftDir, sessionId: "session-1" });
+    await draftWriter.append(draft1);
+    await draftWriter.append(draft2);
+
+    let providerDrafts: DraftCandidate[] = [];
+    const provider: ConsolidationProvider = {
+      consolidate: async (input) => {
+        providerDrafts = input.drafts;
+        return {
+          entries: input.drafts.map((d) => ({
+            entry: makePendingEntry({
+              id: "",
+              title: d.title,
+              content: d.content,
+              contentHash: contentHash(d.content),
+            }),
+            consumedEntryIds: [],
+          })),
+        };
+      },
+    };
+
+    const consolidator = new Consolidator({
+      draftReader: new DraftStoreReader({ draftDir }),
+      observationReader: new ObservationLogReader({ observationDir }),
+      sharedStore,
+      approvalStore,
+      provider,
+      statePath: join(testDir, "consolidation-state.json"),
+      now: makeTimestamp,
+    });
+
+    const result = await consolidator.run();
+    expect(result.ok).toBe(true);
+    // Only the first draft should survive
+    expect(providerDrafts).toHaveLength(1);
+    expect(providerDrafts[0]!.id).toBe("draft-intra-1");
+    if (result.ok) {
+      expect(result.mergedEntryIds).toContain("draft-intra-2");
+    }
+  });
+
+  it("stores normalizedHash on saved entries", async () => {
+    const draftDir = join(testDir, "drafts");
+    const observationDir = join(testDir, "observations");
+    const sharedStore = new FileSharedStore({
+      storagePath: join(testDir, "shared.json"),
+      now: makeTimestamp,
+      createId: () => `sk-${String(idCounter++).padStart(4, "0")}`,
+    });
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: join(testDir, "approval-ledger.json"),
+      sharedStore,
+      now: makeTimestamp,
+      createId: () => `ledger-${String(idCounter++).padStart(4, "0")}`,
+    });
+
+    const draft = makeDraft({
+      content: "Enable connection pooling for PostgreSQL databases",
+    });
+    await new DraftStoreWriter({ draftDir, sessionId: "session-1" }).append(draft);
+
+    const provider: ConsolidationProvider = {
+      consolidate: async (input) => ({
+        entries: input.drafts.map((d) => ({
+          entry: makePendingEntry({
+            id: "",
+            title: d.title,
+            content: d.content,
+            contentHash: contentHash(d.content),
+          }),
+          consumedEntryIds: [],
+        })),
+      }),
+    };
+
+    const consolidator = new Consolidator({
+      draftReader: new DraftStoreReader({ draftDir }),
+      observationReader: new ObservationLogReader({ observationDir }),
+      sharedStore,
+      approvalStore,
+      provider,
+      statePath: join(testDir, "consolidation-state.json"),
+      now: makeTimestamp,
+    });
+
+    const result = await consolidator.run();
+    expect(result.ok).toBe(true);
+
+    const entries = await sharedStore.list({ approvalStatus: "pending" });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.normalizedHash).toBe(
+      computeNormalizedHash(draft.content),
+    );
   });
 });

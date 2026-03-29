@@ -7,12 +7,13 @@ import { FileSharedStore } from "../core/file-shared-store";
 import { FileMemoryStore } from "../core/memory-store";
 import { FileApprovalStore } from "../promotion/approval-store";
 import { Consolidator } from "../promotion/consolidator";
+import { FileConflictStore } from "../promotion/conflict-store";
 import { DraftStoreReader } from "../promotion/draft-store";
 import { ObservationLogReader } from "../promotion/observation-log";
 import { resolveConfig } from "../config";
 import { buildSessionStartContext } from "./context-builder";
 import { renderSessionStartTemplate } from "./session-start-template";
-import type { LoreCapabilities } from "../shared/types";
+import type { ConflictTemplateEntry, LoreCapabilities } from "../shared/types";
 import { deriveSessionKey, initWhisperState } from "./whisper-state";
 import type { MemoryEntry } from "../shared/types";
 import { CodexConsolidationProvider } from "../extraction/codex-consolidation-provider";
@@ -370,12 +371,51 @@ export const runSessionStart = async (
       }
     }
 
+    // Load open conflicts for template rendering
+    const conflictInputs: ConflictTemplateEntry[] = [];
+    try {
+      const conflictStore = new FileConflictStore({
+        storagePath: config.conflictStoragePath,
+      });
+      const openConflicts = await conflictStore.list({ status: "open" });
+
+      for (const conflict of openConflicts.slice(0, 1)) {
+        const entryA = await sharedStore.getById(conflict.entryIdA);
+        const entryB = await sharedStore.getById(conflict.entryIdB);
+        if (entryA && entryB) {
+          conflictInputs.push({
+            conflictId: conflict.id,
+            entryA: {
+              id: entryA.id,
+              kind: entryA.kind,
+              content: entryA.content,
+              confidence: entryA.confidence,
+              lastSeenAt: entryA.lastSeenAt,
+            },
+            entryB: {
+              id: entryB.id,
+              kind: entryB.kind,
+              content: entryB.content,
+              confidence: entryB.confidence,
+              lastSeenAt: entryB.lastSeenAt,
+            },
+            conflictType: conflict.conflictType,
+            suggestedWinnerId: conflict.suggestedWinnerId,
+            explanation: conflict.explanation,
+          });
+        }
+      }
+    } catch {
+      // Conflict loading is non-fatal
+    }
+
     const capabilities = getLoreCapabilities();
 
     const template = renderSessionStartTemplate({
       entries: result.selectedEntries,
       capabilities,
       pendingCount,
+      conflicts: conflictInputs.length > 0 ? conflictInputs : undefined,
     });
     log("debug", "session_start.template_rendered", {
       pendingCount,

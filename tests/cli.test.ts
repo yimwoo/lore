@@ -8,6 +8,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createLoreApp } from "../src/app";
 import { runCli } from "../src/cli";
+import { FileSharedStore } from "../src/core/file-shared-store";
+import { FileApprovalStore } from "../src/promotion/approval-store";
+import { FileConflictStore } from "../src/promotion/conflict-store";
+import { contentHash } from "../src/shared/validators";
+import type { SharedKnowledgeEntry } from "../src/shared/types";
 
 const tempDirs: string[] = [];
 const execFileAsync = promisify(execFile);
@@ -425,5 +430,343 @@ We decided to use PostgreSQL.
     const output2 = stdout2.read();
     expect(output2).toContain("Skipped 3 duplicate");
     expect(output2).toContain("Imported 0 entries");
+  });
+});
+
+const makeApprovedEntry = (
+  id: string,
+  content: string,
+  overrides?: Partial<SharedKnowledgeEntry>,
+): SharedKnowledgeEntry => ({
+  id,
+  kind: "domain_rule",
+  title: content.slice(0, 30),
+  content,
+  confidence: 0.9,
+  tags: ["test"],
+  sourceProjectIds: ["proj-1"],
+  sourceMemoryIds: [],
+  promotionSource: "explicit",
+  createdBy: "user",
+  approvalStatus: "approved",
+  approvalSource: "manual",
+  approvedAt: "2026-03-28T10:00:00Z",
+  sessionCount: 1,
+  projectCount: 1,
+  lastSeenAt: "2026-03-28T10:00:00Z",
+  contentHash: contentHash(content),
+  createdAt: "2026-03-28T10:00:00Z",
+  updatedAt: "2026-03-28T10:00:00Z",
+  contradictionCount: 1,
+  ...overrides,
+});
+
+const setupConflict = async (dir: string) => {
+  const sharedStore = new FileSharedStore({
+    storagePath: join(dir, "shared.json"),
+  });
+  const approvalStore = new FileApprovalStore({
+    ledgerPath: join(dir, "approval-ledger.json"),
+    sharedStore,
+  });
+  const conflictStore = new FileConflictStore({
+    storagePath: join(dir, "conflicts.json"),
+  });
+
+  const entryA = makeApprovedEntry("sk-aaa", "Always use snake_case for DB columns");
+  const entryB = makeApprovedEntry("sk-bbb", "Never use snake_case for DB columns");
+
+  await sharedStore.save(entryA);
+  await sharedStore.save(entryB);
+
+  await conflictStore.add({
+    entryIdA: "sk-aaa",
+    entryIdB: "sk-bbb",
+    conflictType: "direct_negation",
+    subjectOverlap: 1.0,
+    scopeOverlap: 1.0,
+    suggestedWinnerId: "sk-aaa",
+    explanation: "Direct contradiction",
+  });
+
+  return { sharedStore, approvalStore, conflictStore };
+};
+
+describe("resolve command", () => {
+  it("--keep keeps the specified entry and demotes the other", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "lore-cli-resolve-"));
+    tempDirs.push(dir);
+    const { sharedStore, approvalStore, conflictStore } = await setupConflict(dir);
+
+    const stdout = createWritable();
+    const stderr = createWritable();
+
+    const exitCode = await runCli(
+      ["resolve", "sk-aaa", "sk-bbb", "--keep", "sk-aaa", "--shared-dir", dir],
+      {
+        stdin: Readable.from([]),
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(stdout.read()).toContain("Resolved: kept sk-aaa, demoted sk-bbb");
+
+    const demoted = await sharedStore.getById("sk-bbb");
+    expect(demoted!.approvalStatus).toBe("demoted");
+
+    const conflicts = await conflictStore.list({ status: "resolved" });
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]!.resolution).toBe("keep_a");
+
+    const ledger = await approvalStore.readAll();
+    const resolveLedger = ledger.filter((e) => e.action === "resolve");
+    expect(resolveLedger).toHaveLength(1);
+    expect(resolveLedger[0]!.metadata?.supersededEntryId).toBe("sk-bbb");
+  });
+
+  it("--dismiss marks conflict resolved without changing entries", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "lore-cli-resolve-"));
+    tempDirs.push(dir);
+    const { sharedStore, conflictStore } = await setupConflict(dir);
+
+    const stdout = createWritable();
+    const stderr = createWritable();
+
+    const exitCode = await runCli(
+      ["resolve", "sk-aaa", "sk-bbb", "--dismiss", "--shared-dir", dir],
+      {
+        stdin: Readable.from([]),
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(stdout.read()).toContain("Dismissed conflict");
+
+    const entryA = await sharedStore.getById("sk-aaa");
+    expect(entryA!.approvalStatus).toBe("approved");
+
+    const entryB = await sharedStore.getById("sk-bbb");
+    expect(entryB!.approvalStatus).toBe("approved");
+
+    const conflicts = await conflictStore.list({ status: "resolved" });
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]!.resolution).toBe("dismiss");
+
+    // contradictionCount decremented
+    expect(entryA!.contradictionCount).toBe(0);
+    expect(entryB!.contradictionCount).toBe(0);
+  });
+
+  it("--merge creates a merged entry and demotes both originals", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "lore-cli-resolve-"));
+    tempDirs.push(dir);
+    const { sharedStore, conflictStore } = await setupConflict(dir);
+
+    const stdout = createWritable();
+    const stderr = createWritable();
+
+    const exitCode = await runCli(
+      ["resolve", "sk-aaa", "sk-bbb", "--merge", "--shared-dir", dir],
+      {
+        stdin: Readable.from([]),
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    const output = stdout.read();
+    expect(output).toContain("merged");
+
+    const entryA = await sharedStore.getById("sk-aaa");
+    expect(entryA!.approvalStatus).toBe("demoted");
+
+    const entryB = await sharedStore.getById("sk-bbb");
+    expect(entryB!.approvalStatus).toBe("demoted");
+
+    const conflicts = await conflictStore.list({ status: "resolved" });
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]!.resolution).toBe("merge");
+  });
+
+  it("--scope adds project tag to scoped entry", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "lore-cli-resolve-"));
+    tempDirs.push(dir);
+    const { sharedStore, conflictStore } = await setupConflict(dir);
+
+    const stdout = createWritable();
+    const stderr = createWritable();
+
+    const exitCode = await runCli(
+      ["resolve", "sk-aaa", "sk-bbb", "--scope", "sk-bbb", "--project", "api", "--shared-dir", dir],
+      {
+        stdin: Readable.from([]),
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(stdout.read()).toContain("scoped sk-bbb to project");
+
+    const scopedEntry = await sharedStore.getById("sk-bbb");
+    expect(scopedEntry!.tags).toContain("project:api");
+
+    const conflicts = await conflictStore.list({ status: "resolved" });
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]!.resolution).toBe("scope");
+  });
+
+  it("shows error when no conflict exists between given IDs", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "lore-cli-resolve-"));
+    tempDirs.push(dir);
+
+    const sharedStore = new FileSharedStore({
+      storagePath: join(dir, "shared.json"),
+    });
+    await sharedStore.save(makeApprovedEntry("sk-xxx", "Some entry"));
+    await sharedStore.save(makeApprovedEntry("sk-yyy", "Another entry"));
+
+    const stdout = createWritable();
+    const stderr = createWritable();
+
+    const exitCode = await runCli(
+      ["resolve", "sk-xxx", "sk-yyy", "--keep", "sk-xxx", "--shared-dir", dir],
+      {
+        stdin: Readable.from([]),
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      },
+    );
+
+    expect(exitCode).toBe(1);
+    expect(stderr.read()).toContain("No conflict found");
+  });
+
+  it("shows error when no resolution option is specified", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "lore-cli-resolve-"));
+    tempDirs.push(dir);
+    await setupConflict(dir);
+
+    const stdout = createWritable();
+    const stderr = createWritable();
+
+    const exitCode = await runCli(
+      ["resolve", "sk-aaa", "sk-bbb", "--shared-dir", dir],
+      {
+        stdin: Readable.from([]),
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      },
+    );
+
+    expect(exitCode).toBe(1);
+    expect(stderr.read()).toContain("Specify a resolution");
+  });
+});
+
+describe("history command", () => {
+  it("shows supersession chain when entry has been superseded", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "lore-cli-history-"));
+    tempDirs.push(dir);
+
+    const sharedStore = new FileSharedStore({
+      storagePath: join(dir, "shared.json"),
+    });
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: join(dir, "approval-ledger.json"),
+      sharedStore,
+    });
+
+    const winner = makeApprovedEntry("sk-winner", "Always use camelCase");
+    const loser = makeApprovedEntry("sk-loser", "Always use snake_case", {
+      approvalStatus: "demoted",
+    });
+    await sharedStore.save(winner);
+    await sharedStore.save(loser);
+
+    await approvalStore.append({
+      knowledgeEntryId: "sk-winner",
+      action: "resolve",
+      actor: "user",
+      reason: "Kept sk-winner, demoted sk-loser",
+      metadata: {
+        conflictId: "conf-001",
+        resolution: "keep_a",
+        supersededEntryId: "sk-loser",
+        supersessionReason: "superseded:user_correction",
+      },
+    });
+
+    const stdout = createWritable();
+    const stderr = createWritable();
+
+    const exitCode = await runCli(
+      ["history", "sk-winner", "--shared-dir", dir],
+      {
+        stdin: Readable.from([]),
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    const output = stdout.read();
+    expect(output).toContain("History for sk-winner");
+    expect(output).toContain("Supersedes:");
+    expect(output).toContain("sk-loser");
+    expect(output).toContain("superseded:user_correction");
+
+    // Also test from the loser's perspective
+    const stdout2 = createWritable();
+    const exitCode2 = await runCli(
+      ["history", "sk-loser", "--shared-dir", dir],
+      {
+        stdin: Readable.from([]),
+        stdout: stdout2.stream,
+        stderr: createWritable().stream,
+      },
+    );
+
+    expect(exitCode2).toBe(0);
+    const output2 = stdout2.read();
+    expect(output2).toContain("History for sk-loser");
+    expect(output2).toContain("Superseded by:");
+    expect(output2).toContain("sk-winner");
+  });
+
+  it("shows entry details and ledger when no supersession history exists", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "lore-cli-history-"));
+    tempDirs.push(dir);
+
+    const sharedStore = new FileSharedStore({
+      storagePath: join(dir, "shared.json"),
+    });
+
+    await sharedStore.save(makeApprovedEntry("sk-solo", "Standalone entry"));
+
+    const stdout = createWritable();
+    const stderr = createWritable();
+
+    const exitCode = await runCli(
+      ["history", "sk-solo", "--shared-dir", dir],
+      {
+        stdin: Readable.from([]),
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    const output = stdout.read();
+    expect(output).toContain("History for sk-solo");
+    expect(output).toContain("Kind: domain_rule");
+    expect(output).toContain("Ledger:");
+    expect(output).not.toContain("Superseded by:");
+    expect(output).not.toContain("Supersedes:");
   });
 });

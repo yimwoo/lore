@@ -151,6 +151,7 @@ export type SharedKnowledgeEntry = {
   projectCount: number;
   lastSeenAt: string;
   contentHash: string;
+  normalizedHash?: string;
 
   createdAt: string;
   updatedAt: string;
@@ -179,6 +180,15 @@ export type ContextBuilderResult = {
   injectedContentHashes: string[];
 };
 
+export type ConflictTemplateEntry = {
+  conflictId: string;
+  entryA: { id: string; kind: SharedKnowledgeKind; content: string; confidence: number; lastSeenAt: string };
+  entryB: { id: string; kind: SharedKnowledgeKind; content: string; confidence: number; lastSeenAt: string };
+  conflictType: ConflictType;
+  suggestedWinnerId: string | null;
+  explanation: string;
+};
+
 export type SessionStartTemplateInput = {
   entries: SelectedEntry[];
   capabilities: LoreCapabilities;
@@ -189,6 +199,7 @@ export type SessionStartTemplateInput = {
     content: string;
     undoCommand: "lore no";
   };
+  conflicts?: ConflictTemplateEntry[];
 };
 
 export type SharedKnowledgeFilter = {
@@ -206,7 +217,52 @@ export type StoreResult = {
   reason?: string;
 };
 
-export const ledgerActions = ["promote", "approve", "reject", "demote", "merge"] as const;
+export const conflictTypes = [
+  "direct_negation",
+  "scope_mismatch",
+  "temporal_supersession",
+  "specialization",
+  "ambiguous",
+] as const;
+
+export type ConflictType = (typeof conflictTypes)[number];
+
+export const conflictResolutions = [
+  "keep_a",
+  "keep_b",
+  "scope",
+  "merge",
+  "dismiss",
+] as const;
+
+export type ConflictResolution = (typeof conflictResolutions)[number];
+
+export type ConflictRecord = {
+  id: string;
+  entryIdA: string;
+  entryIdB: string;
+  conflictType: ConflictType;
+  subjectOverlap: number;
+  scopeOverlap: number;
+  suggestedWinnerId: string | null;
+  explanation: string;
+  status: "open" | "resolved";
+  resolution?: ConflictResolution;
+  resolvedAt?: string;
+  resolvedReason?: string;
+  detectedAt: string;
+};
+
+export const supersessionReasons = [
+  "superseded:user_correction",
+  "superseded:scope_narrowed",
+  "superseded:updated",
+  "superseded:merged",
+] as const;
+
+export type SupersessionReason = (typeof supersessionReasons)[number];
+
+export const ledgerActions = ["promote", "approve", "reject", "demote", "merge", "resolve"] as const;
 
 export type LedgerAction = (typeof ledgerActions)[number];
 

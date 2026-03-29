@@ -1,4 +1,6 @@
 import type {
+  ConflictTemplateEntry,
+  ConflictType,
   LoreCapabilities,
   SelectedEntry,
   SessionStartTemplateInput,
@@ -325,6 +327,79 @@ const renderBehaviorTable = (capabilities: LoreCapabilities): string => {
   return `## Behavior Summary Table\n\n${header}\n${separator}\n${body}`;
 };
 
+const CONFLICT_TYPE_PRIORITY: Record<ConflictType, number> = {
+  direct_negation: 0,
+  temporal_supersession: 1,
+  scope_mismatch: 2,
+  ambiguous: 3,
+  specialization: 4,
+};
+
+const CONFLICT_TYPE_LABELS: Record<string, string> = {
+  direct_negation: "Direct negation (same scope, opposing directives)",
+  scope_mismatch: "Scope mismatch (one rule is more specific)",
+  temporal_supersession: "Temporal supersession (one rule is significantly older)",
+  ambiguous: "Ambiguous (overlapping scope, opposing directives)",
+};
+
+const truncate = (text: string, maxLength: number): string =>
+  text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+
+const formatRecency = (isoDate: string): string => {
+  const ms = Date.now() - new Date(isoDate).getTime();
+  const days = Math.floor(ms / (1000 * 60 * 60 * 24));
+  if (days === 0) return "today";
+  if (days === 1) return "1 day ago";
+  return `${days} days ago`;
+};
+
+const renderConflictBlock = (
+  conflict: ConflictTemplateEntry,
+): string => {
+  const labelA = whisperLabelMap[conflict.entryA.kind] ?? conflict.entryA.kind;
+  const labelB = whisperLabelMap[conflict.entryB.kind] ?? conflict.entryB.kind;
+
+  const recencyA = formatRecency(conflict.entryA.lastSeenAt);
+  const recencyB = formatRecency(conflict.entryB.lastSeenAt);
+
+  const conflictTypeLabel = CONFLICT_TYPE_LABELS[conflict.conflictType] ?? conflict.conflictType;
+
+  const winnerLine = conflict.suggestedWinnerId
+    ? `Default winner: ${conflict.suggestedWinnerId === conflict.entryA.id ? conflict.entryA.id : conflict.entryB.id}`
+    : "No clear winner; user decision required";
+
+  const lines = [
+    "[Lore - conflict detected]",
+    "These two entries may contradict each other:",
+    "",
+    `  ${conflict.entryA.id} [${labelA}] "${truncate(conflict.entryA.content, 60)}"`,
+    `      confidence: ${conflict.entryA.confidence.toFixed(2)} | last seen: ${recencyA}`,
+    "",
+    `  ${conflict.entryB.id} [${labelB}] "${truncate(conflict.entryB.content, 60)}"`,
+    `      confidence: ${conflict.entryB.confidence.toFixed(2)} | last seen: ${recencyB}`,
+    "",
+    `  Conflict type: ${conflictTypeLabel}`,
+    `  ${winnerLine}`,
+    "",
+    `  Resolve: \`lore resolve ${conflict.entryA.id} ${conflict.entryB.id} --keep ${conflict.suggestedWinnerId ?? conflict.entryA.id}\``,
+  ];
+
+  return lines.join("\n");
+};
+
+const renderConflictSection2 = (conflicts?: ConflictTemplateEntry[]): string => {
+  if (!conflicts || conflicts.length === 0) return "";
+
+  // Pick highest-priority conflict
+  const sorted = [...conflicts].sort(
+    (a, b) =>
+      (CONFLICT_TYPE_PRIORITY[a.conflictType] ?? 99) -
+      (CONFLICT_TYPE_PRIORITY[b.conflictType] ?? 99),
+  );
+
+  return renderConflictBlock(sorted[0]!);
+};
+
 const renderConfigurationNotes = (): string =>
   `## Configuration Notes
 
@@ -350,9 +425,9 @@ These are UX-level tuning decisions that should be reviewed after real-world usa
 export const renderSessionStartTemplate = (
   input: SessionStartTemplateInput,
 ): string | null => {
-  const { entries, capabilities, pendingCount = 0, savedReceipt } = input;
+  const { entries, capabilities, pendingCount = 0, savedReceipt, conflicts } = input;
 
-  if (entries.length === 0 && pendingCount === 0 && !savedReceipt) return null;
+  if (entries.length === 0 && pendingCount === 0 && !savedReceipt && (!conflicts || conflicts.length === 0)) return null;
 
   const sections = [
     renderLoreIntro(capabilities),
@@ -363,6 +438,7 @@ export const renderSessionStartTemplate = (
     renderConflictSection(capabilities),
     entries.length > 0 ? renderSessionKnowledge(entries) : "",
     renderSavedReceipt(savedReceipt),
+    renderConflictSection2(conflicts),
     renderPendingDigest(pendingCount),
     renderWhisperReference(),
     renderBehaviorTable(capabilities),

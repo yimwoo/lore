@@ -10,6 +10,8 @@ import type {
   ConsolidationProvider,
   ConsolidationObservation,
 } from "../extraction/consolidation-provider";
+import { classifyConflict } from "./conflict-detector";
+import type { FileConflictStore } from "./conflict-store";
 import type { DraftCandidate, SharedKnowledgeEntry } from "../shared/types";
 import {
   createRunId,
@@ -17,6 +19,7 @@ import {
   dlog,
   type DebugLogLevel,
 } from "../shared/debug-log";
+import { computeNormalizedHash, classifyDuplicate } from "../shared/semantic-normalizer";
 
 type ConsolidatorOptions = {
   draftReader: DraftStoreReader;
@@ -24,6 +27,7 @@ type ConsolidatorOptions = {
   sharedStore: SharedKnowledgeStore;
   approvalStore: FileApprovalStore;
   provider: ConsolidationProvider;
+  conflictStore?: FileConflictStore;
   statePath: string;
   now?: () => string;
 };
@@ -56,6 +60,72 @@ const CONVERGENCE_AUTO_APPROVAL_LIMIT = 3;
 const isConvergenceEligibleKind = (
   kind: SharedKnowledgeEntry["kind"],
 ): boolean => kind === "domain_rule" || kind === "glossary_term";
+
+type DedupResult = {
+  uniqueDrafts: DraftCandidate[];
+  mergedDraftIds: string[];
+  candidatePairs: Array<{
+    draftId: string;
+    existingEntryId: string;
+    similarity: number;
+  }>;
+};
+
+const deduplicateDrafts = (
+  drafts: DraftCandidate[],
+  existingEntries: SharedKnowledgeEntry[],
+): DedupResult => {
+  const uniqueDrafts: DraftCandidate[] = [];
+  const mergedDraftIds: string[] = [];
+  const candidatePairs: DedupResult["candidatePairs"] = [];
+
+  for (const draft of drafts) {
+    let dominated = false;
+
+    // Check against existing entries
+    for (const existing of existingEntries) {
+      const classification = classifyDuplicate(draft.content, existing.content);
+
+      if (
+        classification.outcome === "exact_duplicate" ||
+        classification.outcome === "near_duplicate"
+      ) {
+        mergedDraftIds.push(draft.id);
+        dominated = true;
+        break;
+      }
+
+      if (classification.outcome === "candidate_duplicate") {
+        candidatePairs.push({
+          draftId: draft.id,
+          existingEntryId: existing.id,
+          similarity: classification.similarity,
+        });
+      }
+    }
+
+    if (!dominated) {
+      // Check against other drafts in this batch (intra-batch dedup)
+      for (const other of uniqueDrafts) {
+        const classification = classifyDuplicate(draft.content, other.content);
+        if (
+          classification.outcome === "exact_duplicate" ||
+          classification.outcome === "near_duplicate"
+        ) {
+          mergedDraftIds.push(draft.id);
+          dominated = true;
+          break;
+        }
+      }
+    }
+
+    if (!dominated) {
+      uniqueDrafts.push(draft);
+    }
+  }
+
+  return { uniqueDrafts, mergedDraftIds, candidatePairs };
+};
 
 const aggregateObservations = async (
   reader: ObservationLogReader,
@@ -182,6 +252,7 @@ export class Consolidator {
   private readonly sharedStore: SharedKnowledgeStore;
   private readonly approvalStore: FileApprovalStore;
   private readonly provider: ConsolidationProvider;
+  private readonly conflictStore: FileConflictStore | undefined;
   private readonly statePath: string;
   private readonly now: () => string;
 
@@ -191,8 +262,56 @@ export class Consolidator {
     this.sharedStore = options.sharedStore;
     this.approvalStore = options.approvalStore;
     this.provider = options.provider;
+    this.conflictStore = options.conflictStore;
     this.statePath = options.statePath;
     this.now = options.now ?? (() => new Date().toISOString());
+  }
+
+  private async detectAndStoreConflicts(
+    newEntryIds: string[],
+  ): Promise<number> {
+    if (!this.conflictStore) return 0;
+
+    const approved = await this.sharedStore.list({ approvalStatus: "approved" });
+
+    const newEntries = approved.filter((e) => newEntryIds.includes(e.id));
+    const existingEntries = approved.filter((e) => !newEntryIds.includes(e.id));
+
+    let conflictCount = 0;
+    for (const newEntry of newEntries) {
+      for (const existing of existingEntries) {
+        const result = classifyConflict(newEntry, existing);
+        if (!result.isConflict) continue;
+        if (result.conflictType === "specialization") continue;
+
+        const existingConflict = await this.conflictStore.findByEntryIds(
+          newEntry.id,
+          existing.id,
+        );
+        if (existingConflict) continue;
+
+        await this.conflictStore.add({
+          entryIdA: newEntry.id,
+          entryIdB: existing.id,
+          conflictType: result.conflictType,
+          subjectOverlap: result.subjectOverlap,
+          scopeOverlap: result.scopeOverlap,
+          suggestedWinnerId: result.suggestedWinnerId,
+          explanation: result.explanation,
+        });
+
+        await this.sharedStore.update(newEntry.id, {
+          contradictionCount: (newEntry.contradictionCount ?? 0) + 1,
+        });
+        await this.sharedStore.update(existing.id, {
+          contradictionCount: (existing.contradictionCount ?? 0) + 1,
+        });
+
+        conflictCount += 1;
+      }
+    }
+
+    return conflictCount;
   }
 
   async run(): Promise<ConsolidationRunResult> {
@@ -280,16 +399,55 @@ export class Consolidator {
       }, {
         ok: true,
       });
+
+      const existingApprovedEntries = await this.sharedStore.list({
+        approvalStatus: "approved",
+      });
+
+      const dedup = deduplicateDrafts(drafts, existingApprovedEntries);
+      log("debug", "consolidation.dedup_completed", {
+        inputDraftCount: drafts.length,
+        uniqueDraftCount: dedup.uniqueDrafts.length,
+        mergedDraftCount: dedup.mergedDraftIds.length,
+        candidatePairCount: dedup.candidatePairs.length,
+      }, {
+        ok: true,
+      });
+
+      if (dedup.uniqueDrafts.length === 0) {
+        log("debug", "consolidation.all_drafts_deduplicated", undefined, {
+          ok: true,
+          summary: "All drafts were duplicates; nothing to consolidate.",
+        });
+        const lastConsolidatedAt = drafts.reduce(
+          (latest, draft) => (draft.timestamp > latest ? draft.timestamp : latest),
+          drafts[0]!.timestamp,
+        );
+        await writeConsolidationState(this.statePath, {
+          lastAttemptedAt: startedAt,
+          lastConsolidatedAt,
+          lastStatus: "ok",
+          lastError: undefined,
+        });
+        return {
+          ok: true,
+          processedDraftCount: drafts.length,
+          savedEntryIds: [],
+          mergedEntryIds: dedup.mergedDraftIds,
+        };
+      }
+
       log("debug", "consolidation.provider_started", {
-        draftCount: drafts.length,
+        draftCount: dedup.uniqueDrafts.length,
         pendingCount: existingPendingEntries.length,
       }, {
         ok: true,
       });
       const result = await this.provider.consolidate({
-        drafts,
+        drafts: dedup.uniqueDrafts,
         observations,
         existingPendingEntries,
+        candidatePairs: dedup.candidatePairs,
       });
       log("debug", "consolidation.provider_done", {
         entryCount: result.entries.length,
@@ -312,14 +470,18 @@ export class Consolidator {
           (observation?.sessionCount ?? consolidated.entry.sessionCount) >=
             CONVERGENCE_SESSION_THRESHOLD &&
           (observation?.contextKeyCount ?? 0) >= CONVERGENCE_CONTEXT_THRESHOLD;
+        const entryWithHash = {
+          ...consolidated.entry,
+          normalizedHash: computeNormalizedHash(consolidated.entry.content),
+        };
         const entryToSave = shouldAutoApprove
           ? {
-              ...consolidated.entry,
+              ...entryWithHash,
               approvalStatus: "approved" as const,
               approvalSource: "auto:convergence" as const,
               approvedAt: this.now(),
             }
-          : consolidated.entry;
+          : entryWithHash;
         if (shouldAutoApprove) {
           autoApprovedCount += 1;
           log("debug", "consolidation.entry_auto_approved", {
@@ -353,6 +515,13 @@ export class Consolidator {
         }
       }
 
+      const conflictCount = await this.detectAndStoreConflicts(savedEntryIds);
+      log("debug", "consolidation.conflicts_detected", {
+        conflictCount,
+      }, {
+        ok: true,
+      });
+
       const lastConsolidatedAt = drafts.reduce(
         (latest, draft) => (draft.timestamp > latest ? draft.timestamp : latest),
         drafts[0]!.timestamp,
@@ -381,7 +550,7 @@ export class Consolidator {
         ok: true,
         processedDraftCount: drafts.length,
         savedEntryIds,
-        mergedEntryIds,
+        mergedEntryIds: [...dedup.mergedDraftIds, ...mergedEntryIds],
       };
     } catch (error) {
       await writeConsolidationState(this.statePath, {

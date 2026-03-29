@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import { renderSessionStartTemplate } from "../src/plugin/session-start-template";
 import type {
+  ConflictTemplateEntry,
+  ConflictType,
   LoreCapabilities,
   SelectedEntry,
   SharedKnowledgeKind,
@@ -399,5 +401,149 @@ describe("renderSessionStartTemplate", () => {
     expect(result).toContain("[Lore · saved @l1]");
     expect(result).toContain("DB columns use snake_case across services.");
     expect(result).toContain("lore no");
+  });
+});
+
+const makeConflict = (overrides?: Partial<ConflictTemplateEntry>): ConflictTemplateEntry => ({
+  conflictId: "conf-001",
+  entryA: {
+    id: "sk-a",
+    kind: "domain_rule",
+    content: "Always use snake_case for DB columns",
+    confidence: 0.92,
+    lastSeenAt: "2026-03-27T10:00:00Z",
+  },
+  entryB: {
+    id: "sk-b",
+    kind: "domain_rule",
+    content: "Use camelCase for all column names",
+    confidence: 0.85,
+    lastSeenAt: "2026-03-14T10:00:00Z",
+  },
+  conflictType: "direct_negation",
+  suggestedWinnerId: "sk-a",
+  explanation: "Direct contradiction",
+  ...overrides,
+});
+
+describe("conflict rendering", () => {
+  it("renders conflict block when conflicts contains one entry", () => {
+    const result = renderSessionStartTemplate({
+      entries: [makeSelectedEntry()],
+      capabilities: NO_CAPABILITIES,
+      conflicts: [makeConflict()],
+    })!;
+    expect(result).toContain("[Lore - conflict detected]");
+    expect(result).toContain("sk-a");
+    expect(result).toContain("sk-b");
+  });
+
+  it("does not render conflict block when conflicts is undefined", () => {
+    const result = renderSessionStartTemplate({
+      entries: [makeSelectedEntry()],
+      capabilities: NO_CAPABILITIES,
+    })!;
+    expect(result).not.toContain("[Lore - conflict detected]");
+  });
+
+  it("does not render conflict block when conflicts is empty", () => {
+    const result = renderSessionStartTemplate({
+      entries: [makeSelectedEntry()],
+      capabilities: NO_CAPABILITIES,
+      conflicts: [],
+    })!;
+    expect(result).not.toContain("[Lore - conflict detected]");
+  });
+
+  it("renders at most one conflict block when conflicts has three entries", () => {
+    const conflicts = [
+      makeConflict({ conflictId: "conf-1" }),
+      makeConflict({ conflictId: "conf-2", conflictType: "scope_mismatch" }),
+      makeConflict({ conflictId: "conf-3", conflictType: "ambiguous" }),
+    ];
+    const result = renderSessionStartTemplate({
+      entries: [makeSelectedEntry()],
+      capabilities: NO_CAPABILITIES,
+      conflicts,
+    })!;
+    const count = result.split("[Lore - conflict detected]").length - 1;
+    expect(count).toBe(1);
+  });
+
+  it("renders the direct_negation conflict when both direct_negation and ambiguous are present", () => {
+    const conflicts = [
+      makeConflict({
+        conflictId: "conf-ambiguous",
+        conflictType: "ambiguous",
+        entryA: {
+          id: "sk-x",
+          kind: "domain_rule",
+          content: "Ambiguous entry A",
+          confidence: 0.8,
+          lastSeenAt: "2026-03-27T10:00:00Z",
+        },
+        entryB: {
+          id: "sk-y",
+          kind: "domain_rule",
+          content: "Ambiguous entry B",
+          confidence: 0.7,
+          lastSeenAt: "2026-03-27T10:00:00Z",
+        },
+      }),
+      makeConflict({
+        conflictId: "conf-negation",
+        conflictType: "direct_negation",
+        entryA: {
+          id: "sk-p",
+          kind: "domain_rule",
+          content: "Direct negation entry A",
+          confidence: 0.9,
+          lastSeenAt: "2026-03-27T10:00:00Z",
+        },
+        entryB: {
+          id: "sk-q",
+          kind: "domain_rule",
+          content: "Direct negation entry B",
+          confidence: 0.85,
+          lastSeenAt: "2026-03-27T10:00:00Z",
+        },
+      }),
+    ];
+    const result = renderSessionStartTemplate({
+      entries: [makeSelectedEntry()],
+      capabilities: NO_CAPABILITIES,
+      conflicts,
+    })!;
+    expect(result).toContain("sk-p");
+    expect(result).toContain("sk-q");
+    expect(result).not.toContain("sk-x");
+    expect(result).not.toContain("sk-y");
+  });
+
+  it("renders 'Default winner:' when suggestedWinnerId is set", () => {
+    const result = renderSessionStartTemplate({
+      entries: [makeSelectedEntry()],
+      capabilities: NO_CAPABILITIES,
+      conflicts: [makeConflict({ suggestedWinnerId: "sk-a" })],
+    })!;
+    expect(result).toContain("Default winner:");
+  });
+
+  it("renders 'No clear winner' when suggestedWinnerId is null", () => {
+    const result = renderSessionStartTemplate({
+      entries: [makeSelectedEntry()],
+      capabilities: NO_CAPABILITIES,
+      conflicts: [makeConflict({ suggestedWinnerId: null })],
+    })!;
+    expect(result).toContain("No clear winner");
+  });
+
+  it("renders a lore resolve command string with both entry IDs", () => {
+    const result = renderSessionStartTemplate({
+      entries: [makeSelectedEntry()],
+      capabilities: NO_CAPABILITIES,
+      conflicts: [makeConflict()],
+    })!;
+    expect(result).toContain("lore resolve sk-a sk-b");
   });
 });

@@ -10,6 +10,7 @@ import { aggregateDashboard, renderDashboardText } from "./core/dashboard-aggreg
 import { FileMemoryStore } from "./core/memory-store";
 import { FileSharedStore } from "./core/file-shared-store";
 import { FileApprovalStore } from "./promotion/approval-store";
+import { FileConflictStore } from "./promotion/conflict-store";
 import { Promoter } from "./promotion/promoter";
 import type { PromoteImportResult } from "./promotion/promoter";
 import { parseMarkdownEntries } from "./core/markdown-parser";
@@ -53,6 +54,8 @@ Commands:
   init                             Interactive onboarding — scan and import convention files
   suggest                        Show observation/debug info for the retired suggestion path
   dashboard                      Show knowledge base overview and health
+  resolve <idA> <idB>            Resolve a conflict between two entries
+  history <id>                   Show the supersession chain for an entry
   help                           Show this help message
 
 Options:
@@ -74,6 +77,10 @@ Options:
   --tag <tag>                    Filter by tag
   --stale                        Show entries not seen in 60+ days
   --contradictions               Show entries with contradictions flagged
+  --keep <id>                    Keep this entry, demote the other
+  --scope <id>                   Scope this entry (use with --project)
+  --merge                        Merge both entries into one
+  --dismiss                      Dismiss the conflict, keep both as-is
 `;
 
 type ParsedArgs = {
@@ -278,6 +285,9 @@ const createPromoter = (options: Record<string, string | boolean>) => {
       : undefined,
     observationDir: sharedDir
       ? join(sharedDir, "observations")
+      : undefined,
+    conflictStoragePath: sharedDir
+      ? join(sharedDir, "conflicts.json")
       : undefined,
   });
 
@@ -677,6 +687,250 @@ const runImport = async (
   await writeOutput(streams.stdout, renderImportSummary(results, absolutePath, approveAll));
 };
 
+const runResolve = async (
+  options: Record<string, string | boolean>,
+  streams: CliStreams,
+  idA: string,
+  idB: string,
+): Promise<void> => {
+  const { promoter, sharedStore, approvalStore, config } = createPromoter(options);
+  const conflictStore = new FileConflictStore({
+    storagePath: config.conflictStoragePath,
+  });
+
+  const conflict = await conflictStore.findByEntryIds(idA, idB);
+  if (!conflict) {
+    throw new Error(
+      `No conflict found between ${idA} and ${idB}. Run \`lore list-shared --contradictions\` to see flagged entries.`,
+    );
+  }
+
+  const entryA = await sharedStore.getById(idA);
+  const entryB = await sharedStore.getById(idB);
+  if (!entryA || !entryB) {
+    throw new Error(`One or both entries not found: ${idA}, ${idB}`);
+  }
+
+  if (typeof options.keep === "string") {
+    const keepId = options.keep;
+    const demoteId = keepId === idA ? idB : idA;
+
+    if (keepId !== idA && keepId !== idB) {
+      throw new Error(`--keep must be one of: ${idA}, ${idB}`);
+    }
+
+    await approvalStore.append({
+      knowledgeEntryId: keepId,
+      action: "resolve",
+      actor: "user",
+      reason: `Resolved conflict: kept ${keepId}, demoted ${demoteId}`,
+      metadata: {
+        conflictId: conflict.id,
+        resolution: keepId === idA ? "keep_a" : "keep_b",
+        supersededEntryId: demoteId,
+        supersessionReason: "superseded:user_correction",
+      },
+    });
+
+    await promoter.demote(demoteId, `Superseded by ${keepId} (conflict resolution)`);
+
+    await conflictStore.resolve(
+      conflict.id,
+      keepId === idA ? "keep_a" : "keep_b",
+      `User kept ${keepId}`,
+    );
+
+    await writeOutput(
+      streams.stdout,
+      `Resolved: kept ${keepId}, demoted ${demoteId}.\n  Conflict ${conflict.id} marked resolved.`,
+    );
+    return;
+  }
+
+  if (options.dismiss === true) {
+    await approvalStore.append({
+      knowledgeEntryId: idA,
+      action: "resolve",
+      actor: "user",
+      reason: "Conflict dismissed: user confirmed both entries are valid",
+      metadata: {
+        conflictId: conflict.id,
+        resolution: "dismiss",
+      },
+    });
+
+    await conflictStore.resolve(conflict.id, "dismiss", "User dismissed conflict");
+
+    await sharedStore.update(idA, {
+      contradictionCount: Math.max(0, (entryA.contradictionCount ?? 1) - 1),
+    });
+    await sharedStore.update(idB, {
+      contradictionCount: Math.max(0, (entryB.contradictionCount ?? 1) - 1),
+    });
+
+    await writeOutput(
+      streams.stdout,
+      `Dismissed conflict between ${idA} and ${idB}.\n  Both entries remain as-is.`,
+    );
+    return;
+  }
+
+  if (typeof options.scope === "string" && typeof options.project === "string") {
+    const scopeId = options.scope;
+    const projectName = options.project;
+
+    if (scopeId !== idA && scopeId !== idB) {
+      throw new Error(`--scope must be one of: ${idA}, ${idB}`);
+    }
+
+    await sharedStore.update(scopeId, {
+      tags: [...(scopeId === idA ? entryA : entryB).tags, `project:${projectName}`],
+    });
+
+    await approvalStore.append({
+      knowledgeEntryId: scopeId,
+      action: "resolve",
+      actor: "user",
+      reason: `Scoped ${scopeId} to project ${projectName}`,
+      metadata: {
+        conflictId: conflict.id,
+        resolution: "scope",
+        supersessionReason: "superseded:scope_narrowed",
+      },
+    });
+
+    await conflictStore.resolve(
+      conflict.id,
+      "scope",
+      `Scoped ${scopeId} to project ${projectName}`,
+    );
+
+    await writeOutput(
+      streams.stdout,
+      `Resolved: scoped ${scopeId} to project "${projectName}".\n  Both entries remain valid.`,
+    );
+    return;
+  }
+
+  if (options.merge === true) {
+    const mergedContent = `${entryA.content}\n${entryB.content}`;
+    const mergedTags = Array.from(new Set([...entryA.tags, ...entryB.tags]));
+
+    const result = await promoter.promoteExplicit({
+      kind: entryA.kind,
+      title: `Merged: ${entryA.title}`,
+      content: mergedContent,
+      tags: mergedTags,
+    });
+
+    if (!result.ok) {
+      throw new Error(`Merge failed: ${result.reason}`);
+    }
+
+    await promoter.demote(idA, `Merged into ${result.entry.id}`);
+    await promoter.demote(idB, `Merged into ${result.entry.id}`);
+
+    await approvalStore.append({
+      knowledgeEntryId: result.entry.id,
+      action: "resolve",
+      actor: "user",
+      reason: `Merged ${idA} and ${idB}`,
+      metadata: {
+        conflictId: conflict.id,
+        resolution: "merge",
+        supersededEntryId: `${idA},${idB}`,
+        supersessionReason: "superseded:merged",
+      },
+    });
+
+    await conflictStore.resolve(
+      conflict.id,
+      "merge",
+      `Merged into ${result.entry.id}`,
+    );
+
+    await writeOutput(
+      streams.stdout,
+      `Resolved: merged ${idA} and ${idB} into ${result.entry.id}.\n  Original entries demoted.`,
+    );
+    return;
+  }
+
+  throw new Error(
+    `Specify a resolution: --keep <id>, --scope <id> --project <name>, --merge, or --dismiss`,
+  );
+};
+
+const runHistory = async (
+  options: Record<string, string | boolean>,
+  streams: CliStreams,
+  entryId: string,
+): Promise<void> => {
+  const { sharedStore, approvalStore } = createPromoter(options);
+
+  const entry = await sharedStore.getById(entryId);
+  if (!entry) {
+    throw new Error(`Entry not found: ${entryId}`);
+  }
+
+  const allLedger = await approvalStore.readAll();
+
+  const superseded = allLedger.filter(
+    (le) =>
+      le.knowledgeEntryId === entryId &&
+      le.metadata?.supersededEntryId,
+  );
+
+  const supersededBy = allLedger.filter(
+    (le) =>
+      le.metadata?.supersededEntryId === entryId ||
+      (typeof le.metadata?.supersededEntryId === "string" &&
+       le.metadata.supersededEntryId.split(",").includes(entryId)),
+  );
+
+  const lines = [
+    `History for ${entryId}`,
+    `  Kind: ${entry.kind}`,
+    `  Title: ${entry.title}`,
+    `  Status: ${entry.approvalStatus}`,
+    `  Content: ${entry.content}`,
+    "",
+  ];
+
+  if (supersededBy.length > 0) {
+    lines.push("Superseded by:");
+    for (const le of supersededBy) {
+      const reason = le.metadata?.supersessionReason ?? "unknown";
+      lines.push(`  ${le.knowledgeEntryId} (${reason}) at ${le.timestamp}`);
+    }
+    lines.push("");
+  }
+
+  if (superseded.length > 0) {
+    lines.push("Supersedes:");
+    for (const le of superseded) {
+      const targetId = le.metadata?.supersededEntryId;
+      const reason = le.metadata?.supersessionReason ?? "unknown";
+      lines.push(`  ${targetId} (${reason}) at ${le.timestamp}`);
+    }
+    lines.push("");
+  }
+
+  const ledger = await approvalStore.list(entryId);
+  lines.push("Ledger:");
+  if (ledger.length === 0) {
+    lines.push("  (no ledger entries)");
+  } else {
+    for (const le of ledger) {
+      lines.push(
+        `  ${le.timestamp} | ${le.action} | ${le.actor}${le.reason ? ` | ${le.reason}` : ""}`,
+      );
+    }
+  }
+
+  await writeOutput(streams.stdout, lines.join("\n"));
+};
+
 const runDashboard = async (
   options: Record<string, string | boolean>,
   streams: CliStreams,
@@ -881,6 +1135,33 @@ export const runCli = async (
           summary: "Lore CLI command completed successfully.",
         });
         return 0;
+      case "resolve": {
+        const resolveIdA = parsed.positional[0];
+        const resolveIdB = parsed.positional[1];
+        if (!resolveIdA || !resolveIdB) {
+          throw new Error("Usage: lore resolve <idA> <idB> --keep <id> | --scope <id> --project <name> | --merge | --dismiss");
+        }
+        await runResolve(parsed.options, streams, resolveIdA, resolveIdB);
+        log("info", "cli.command_succeeded", {
+          command: parsed.command,
+        }, {
+          ok: true,
+          summary: "Lore CLI command completed successfully.",
+        });
+        return 0;
+      }
+      case "history": {
+        const historyId = parsed.positional[0];
+        if (!historyId) throw new Error("Missing entry ID for history command.");
+        await runHistory(parsed.options, streams, historyId);
+        log("info", "cli.command_succeeded", {
+          command: parsed.command,
+        }, {
+          ok: true,
+          summary: "Lore CLI command completed successfully.",
+        });
+        return 0;
+      }
       case "help":
       case "--help":
       case "-h":

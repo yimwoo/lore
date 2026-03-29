@@ -17,6 +17,19 @@ import {
   type DebugLogLevel,
 } from "../shared/debug-log";
 
+export type PromoteImportInput = {
+  kind: SharedKnowledgeKind;
+  title: string;
+  content: string;
+  tags?: string[];
+  sourceFilePath: string;
+  approveAll: boolean;
+};
+
+export type PromoteImportResult =
+  | { ok: true; entry: SharedKnowledgeEntry; action: "created" | "merged" | "skipped" }
+  | { ok: false; reason: string };
+
 export type PromoteInput = {
   kind: SharedKnowledgeKind;
   title: string;
@@ -221,6 +234,96 @@ export class Promoter {
       });
     }
     return result;
+  }
+
+  async promoteImport(input: PromoteImportInput): Promise<PromoteImportResult> {
+    const hash = contentHash(input.content);
+
+    // 1. Validate input
+    const validation = validatePromotionInput({
+      kind: input.kind,
+      title: input.title,
+      content: input.content,
+      tags: input.tags,
+    });
+    if (!validation.ok) {
+      return { ok: false, reason: validation.reason };
+    }
+
+    // 2. Check forbid patterns on content and title
+    const forbidCheck = checkForbidPatterns(input.content, input.kind, this.policy);
+    if (!forbidCheck.ok) {
+      return { ok: false, reason: forbidCheck.reason };
+    }
+    const titleForbidCheck = checkForbidPatterns(input.title, input.kind, this.policy);
+    if (!titleForbidCheck.ok) {
+      return { ok: false, reason: titleForbidCheck.reason };
+    }
+
+    // 3. Check for existing entry with same content hash
+    const existing = await this.findExisting(hash, input.kind);
+    if (existing) {
+      if (existing.approvalStatus === "approved" || existing.approvalStatus === "pending") {
+        return { ok: true, entry: existing, action: "skipped" };
+      }
+      // rejected or demoted -> allow re-import as new entry
+    }
+
+    // 4. Create new entry
+    const timestamp = this.now();
+    const id = this.createId();
+    const approveAll = input.approveAll;
+
+    const entry: SharedKnowledgeEntry = {
+      id,
+      kind: input.kind,
+      title: input.title,
+      content: input.content,
+      confidence: 1.0,
+      tags: input.tags ?? [],
+      sourceProjectIds: [],
+      sourceMemoryIds: [],
+      promotionSource: "imported",
+      createdBy: "user",
+      approvalStatus: approveAll ? "approved" : "pending",
+      approvalSource: approveAll ? "import:user_approved" : undefined,
+      approvedAt: approveAll ? timestamp : undefined,
+      statusReason: `Imported from ${input.sourceFilePath}`,
+      sessionCount: 0,
+      projectCount: 0,
+      lastSeenAt: timestamp,
+      contentHash: hash,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+
+    // Ledger first
+    await this.approvalStore.append({
+      knowledgeEntryId: id,
+      action: "promote",
+      actor: "user",
+      actionSource: "imported",
+      reason: `Imported from ${input.sourceFilePath}`,
+    });
+
+    // Approve ledger entry if --approve-all
+    if (approveAll) {
+      await this.approvalStore.append({
+        knowledgeEntryId: id,
+        action: "approve",
+        actor: "user",
+        actionSource: "imported",
+        reason: "Bulk import with --approve-all",
+      });
+    }
+
+    // Save to shared store
+    const result = await this.sharedStore.save(entry);
+    if (!result.ok) {
+      return { ok: false, reason: result.reason ?? "Failed to save entry." };
+    }
+
+    return { ok: true, entry, action: "created" };
   }
 
   async demote(id: string, reason: string): Promise<DemoteResult> {

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import type { SignalStrength } from "../src/shared/types";
 import { FileSharedStore } from "../src/core/file-shared-store";
 import {
   ObservationLogReader,
@@ -185,5 +186,87 @@ describe("SuggestionEngine", () => {
     const { engine } = makeEngine();
     const candidates = await engine.findCandidates();
     expect(candidates).toHaveLength(0);
+  });
+});
+
+const seedObservationsWithSignal = async (
+  entries: Array<{
+    sessionId: string;
+    projectId: string;
+    content: string;
+    kind: "decision" | "working_context" | "reminder";
+    confidence: number;
+    signalStrength?: SignalStrength;
+  }>,
+) => {
+  for (const entry of entries) {
+    const writer = new ObservationLogWriter({
+      observationDir: obsDir,
+      sessionId: entry.sessionId,
+    });
+    await writer.append({
+      sessionId: entry.sessionId,
+      projectId: entry.projectId,
+      contentHash: contentHash(entry.content),
+      kind: entry.kind,
+      confidence: entry.confidence,
+      timestamp: "2026-01-10T00:00:00Z",
+      signalStrength: entry.signalStrength,
+    });
+  }
+};
+
+describe("SuggestionEngine signal strength", () => {
+  it("strong-signal observation bypasses minSessionCount", async () => {
+    await seedObservationsWithSignal([
+      { sessionId: "s1", projectId: "p1", content: "Always use snake_case", kind: "reminder", confidence: 0.9, signalStrength: "strong" },
+    ]);
+
+    const { engine } = makeEngine();
+    const candidates = await engine.findCandidates();
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]!.sessionCount).toBe(1);
+  });
+
+  it("weak-signal observation respects minSessionCount", async () => {
+    await seedObservationsWithSignal([
+      { sessionId: "s1", projectId: "p1", content: "Always use snake_case weak", kind: "reminder", confidence: 0.9, signalStrength: "weak" },
+    ]);
+
+    const { engine } = makeEngine();
+    const candidates = await engine.findCandidates();
+    expect(candidates).toHaveLength(0);
+  });
+
+  it("missing signalStrength treated as weak", async () => {
+    await seedObservationsWithSignal([
+      { sessionId: "s1", projectId: "p1", content: "Always use snake_case none", kind: "reminder", confidence: 0.9 },
+    ]);
+
+    const { engine } = makeEngine();
+    const candidates = await engine.findCandidates();
+    expect(candidates).toHaveLength(0);
+  });
+
+  it("medium-signal observation respects minSessionCount", async () => {
+    await seedObservationsWithSignal([
+      { sessionId: "s1", projectId: "p1", content: "Always use snake_case med", kind: "reminder", confidence: 0.9, signalStrength: "medium" },
+    ]);
+
+    const { engine } = makeEngine();
+    const candidates = await engine.findCandidates();
+    expect(candidates).toHaveLength(0);
+  });
+
+  it("mixed observations: strong upgrades aggregate", async () => {
+    const content = "Always use snake_case mixed";
+    await seedObservationsWithSignal([
+      { sessionId: "s1", projectId: "p1", content, kind: "reminder", confidence: 0.9, signalStrength: "weak" },
+      { sessionId: "s1", projectId: "p1", content, kind: "reminder", confidence: 0.9, signalStrength: "strong" },
+    ]);
+
+    const { engine } = makeEngine();
+    const candidates = await engine.findCandidates();
+    expect(candidates).toHaveLength(1);
   });
 });

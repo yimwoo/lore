@@ -115,7 +115,7 @@ describe("STDIO transport", () => {
     const response = JSON.parse(stdout.trim());
     expect(response.jsonrpc).toBe("2.0");
     expect(response.id).toBe(1);
-    expect(response.result.tools).toHaveLength(4);
+    expect(response.result.tools).toHaveLength(5);
 
     const toolNames = response.result.tools.map(
       (t: { name: string }) => t.name,
@@ -124,6 +124,7 @@ describe("STDIO transport", () => {
     expect(toolNames).toContain("lore.recall_architecture");
     expect(toolNames).toContain("lore.recall_decisions");
     expect(toolNames).toContain("lore.search_knowledge");
+    expect(toolNames).toContain("lore.dashboard");
   });
 
   it("returns recall results on tools/call", async () => {

@@ -113,12 +113,13 @@ export const approvalStatuses = [
 
 export type ApprovalStatus = (typeof approvalStatuses)[number];
 
-export type PromotionSource = "explicit" | "suggested";
+export type PromotionSource = "explicit" | "suggested" | "imported";
 
 export const approvalSources = [
   "manual",
   "implicit:user_stated",
   "auto:convergence",
+  "import:user_approved",
 ] as const;
 
 export type ApprovalSource = (typeof approvalSources)[number];
@@ -220,6 +221,13 @@ export type ApprovalLedgerEntry = {
   timestamp: string;
 };
 
+export const signalStrengths = ["strong", "medium", "weak"] as const;
+
+export type SignalStrength = (typeof signalStrengths)[number];
+
+export const isSignalStrength = (value: string): value is SignalStrength =>
+  signalStrengths.includes(value as SignalStrength);
+
 export type ObservationEntry = {
   sessionId: string;
   projectId: string;
@@ -228,6 +236,7 @@ export type ObservationEntry = {
   confidence: number;
   timestamp: string;
   contextKey?: string;
+  signalStrength?: SignalStrength;
 };
 
 export type DraftCandidate = {
@@ -242,6 +251,7 @@ export type DraftCandidate = {
   turnIndex: number;
   timestamp: string;
   tags: string[];
+  signalStrength?: SignalStrength;
 };
 
 export type ConsolidationState = {
@@ -381,4 +391,41 @@ export const whisperLabelMap: Record<SharedKnowledgeKind, string> = {
   decision_record: "decision",
   user_preference: "preference",
   glossary_term: "term",
+};
+
+// --- Dashboard Types ---
+
+export type KindStatusCounts = {
+  kind: SharedKnowledgeKind;
+  approved: number;
+  pending: number;
+  rejected: number;
+  demoted: number;
+};
+
+export type TagCoverage = {
+  tag: string;
+  entryCount: number;
+  strength: "strong" | "moderate" | "weak";
+};
+
+export type ActivityPeriod = {
+  label: string;
+  promotes: number;
+  approvals: number;
+  rejections: number;
+  demotions: number;
+};
+
+export type HealthIndicator =
+  | { type: "stale_entries"; count: number; thresholdDays: number }
+  | { type: "contradictions"; count: number };
+
+export type DashboardData = {
+  totalEntries: number;
+  kindCounts: KindStatusCounts[];
+  tagCoverage: TagCoverage[];
+  activity: ActivityPeriod[];
+  health: HealthIndicator[];
+  generatedAt: string;
 };

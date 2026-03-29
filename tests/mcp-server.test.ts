@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { FileSharedStore } from "../src/core/file-shared-store";
-import { handleToolCall, toolDefinitions } from "../src/mcp/server";
-import type { SharedKnowledgeEntry } from "../src/shared/types";
+import { FileApprovalStore } from "../src/promotion/approval-store";
+import { handleDashboardToolCall, handleToolCall, toolDefinitions } from "../src/mcp/server";
+import type { DashboardData, SharedKnowledgeEntry } from "../src/shared/types";
 import { contentHash } from "../src/shared/validators";
 
 let testDir: string;
@@ -66,8 +67,8 @@ afterEach(async () => {
 });
 
 describe("toolDefinitions", () => {
-  it("has four tools", () => {
-    expect(toolDefinitions).toHaveLength(4);
+  it("has five tools", () => {
+    expect(toolDefinitions).toHaveLength(5);
   });
 
   it("all tools have name, description, inputSchema", () => {
@@ -235,5 +236,51 @@ describe("unknown tool", () => {
     await expect(
       handleToolCall("lore.unknown", {}, store),
     ).rejects.toThrow("Unknown tool");
+  });
+});
+
+describe("lore.dashboard", () => {
+  it("appears in toolDefinitions", () => {
+    const dashboardTool = toolDefinitions.find((t) => t.name === "lore.dashboard");
+    expect(dashboardTool).toBeDefined();
+    expect(dashboardTool!.description).toContain("overview");
+  });
+
+  it("returns DashboardData with seeded entries", async () => {
+    const approvalStore = new FileApprovalStore({
+      ledgerPath: join(testDir, "approval-ledger.json"),
+      sharedStore: store,
+    });
+
+    const data = await handleDashboardToolCall(store, approvalStore, { staleDaysThreshold: 60 });
+
+    expect(data).toHaveProperty("totalEntries");
+    expect(data).toHaveProperty("kindCounts");
+    expect(data).toHaveProperty("tagCoverage");
+    expect(data).toHaveProperty("activity");
+    expect(data).toHaveProperty("health");
+    expect(data).toHaveProperty("generatedAt");
+    expect(data.kindCounts).toHaveLength(5);
+    expect(data.totalEntries).toBeGreaterThan(0);
+  });
+
+  it("returns zero totalEntries for empty stores", async () => {
+    const emptyDir = join(testDir, "empty");
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(emptyDir, { recursive: true });
+
+    const emptyStore = new FileSharedStore({
+      storagePath: join(emptyDir, "shared.json"),
+    });
+    const emptyApprovalStore = new FileApprovalStore({
+      ledgerPath: join(emptyDir, "approval-ledger.json"),
+      sharedStore: emptyStore,
+    });
+
+    const data = await handleDashboardToolCall(emptyStore, emptyApprovalStore, { staleDaysThreshold: 60 });
+
+    expect(data.totalEntries).toBe(0);
+    expect(data.kindCounts).toHaveLength(5);
+    expect(data.generatedAt).toBeTruthy();
   });
 });

@@ -375,6 +375,210 @@ describe("Promoter.approve", () => {
   });
 });
 
+describe("Promoter.promoteImport", () => {
+  it("creates pending entry by default", async () => {
+    const { promoter, sharedStore } = setup();
+
+    const result = await promoter.promoteImport({
+      kind: "domain_rule",
+      title: "Use snake_case",
+      content: "All DB columns must use snake_case naming convention",
+      tags: ["naming"],
+      sourceFilePath: "CLAUDE.md",
+      approveAll: false,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.action).toBe("created");
+      expect(result.entry.approvalStatus).toBe("pending");
+      expect(result.entry.promotionSource).toBe("imported");
+      expect(result.entry.approvalSource).toBeUndefined();
+      expect(result.entry.approvedAt).toBeUndefined();
+    }
+
+    const entries = await sharedStore.list({ approvalStatus: "pending" });
+    expect(entries).toHaveLength(1);
+  });
+
+  it("creates approved entry with approve-all", async () => {
+    const { promoter } = setup();
+
+    const result = await promoter.promoteImport({
+      kind: "domain_rule",
+      title: "Use snake_case",
+      content: "All DB columns must use snake_case naming convention",
+      sourceFilePath: "CLAUDE.md",
+      approveAll: true,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.action).toBe("created");
+      expect(result.entry.approvalStatus).toBe("approved");
+      expect(result.entry.approvalSource).toBe("import:user_approved");
+      expect(result.entry.approvedAt).toBeDefined();
+    }
+  });
+
+  it("skips duplicate content that is already approved", async () => {
+    const { promoter } = setup();
+
+    await promoter.promoteImport({
+      kind: "domain_rule",
+      title: "Rule A",
+      content: "Same content for dedup test",
+      sourceFilePath: "file.md",
+      approveAll: true,
+    });
+
+    const result = await promoter.promoteImport({
+      kind: "domain_rule",
+      title: "Rule A duplicate",
+      content: "Same content for dedup test",
+      sourceFilePath: "file.md",
+      approveAll: false,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.action).toBe("skipped");
+    }
+  });
+
+  it("skips duplicate content that is pending", async () => {
+    const { promoter } = setup();
+
+    await promoter.promoteImport({
+      kind: "domain_rule",
+      title: "Rule A",
+      content: "Same content for pending dedup test",
+      sourceFilePath: "file.md",
+      approveAll: false,
+    });
+
+    const result = await promoter.promoteImport({
+      kind: "domain_rule",
+      title: "Rule A dup",
+      content: "Same content for pending dedup test",
+      sourceFilePath: "file.md",
+      approveAll: false,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.action).toBe("skipped");
+    }
+  });
+
+  it("allows re-import after rejection", async () => {
+    const { promoter, sharedStore } = setup();
+
+    // Create a pending entry and reject it
+    const pendingEntry: SharedKnowledgeEntry = {
+      id: "sk-rejected-import",
+      kind: "domain_rule",
+      title: "Rejected rule",
+      content: "Content that was rejected for re-import",
+      confidence: 1.0,
+      tags: [],
+      sourceProjectIds: [],
+      sourceMemoryIds: [],
+      promotionSource: "imported",
+      createdBy: "user",
+      approvalStatus: "pending",
+      sessionCount: 0,
+      projectCount: 0,
+      lastSeenAt: "2026-01-01T00:00:00Z",
+      contentHash: contentHash("Content that was rejected for re-import"),
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
+    await sharedStore.save(pendingEntry);
+    await promoter.reject("sk-rejected-import", "not useful");
+
+    // Re-import same content
+    const result = await promoter.promoteImport({
+      kind: "domain_rule",
+      title: "Re-imported rule",
+      content: "Content that was rejected for re-import",
+      sourceFilePath: "file.md",
+      approveAll: false,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.action).toBe("created");
+      expect(result.entry.id).not.toBe("sk-rejected-import");
+    }
+  });
+
+  it("rejects content matching forbidPatterns", async () => {
+    const { promoter } = setup();
+
+    const result = await promoter.promoteImport({
+      kind: "domain_rule",
+      title: "Bad rule",
+      content: "/src/foo.ts should be refactored",
+      sourceFilePath: "file.md",
+      approveAll: false,
+    });
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("writes ledger entries with actionSource imported", async () => {
+    const { promoter, approvalStore } = setup();
+
+    await promoter.promoteImport({
+      kind: "domain_rule",
+      title: "Ledger test rule",
+      content: "Content for ledger test import",
+      sourceFilePath: "test.md",
+      approveAll: false,
+    });
+
+    const ledger = await approvalStore.readAll();
+    const promoteEntry = ledger.find((e) => e.action === "promote");
+    expect(promoteEntry).toBeTruthy();
+    expect(promoteEntry!.actionSource).toBe("imported");
+  });
+
+  it("writes approve ledger entry when approveAll is true", async () => {
+    const { promoter, approvalStore } = setup();
+
+    await promoter.promoteImport({
+      kind: "domain_rule",
+      title: "Approve all ledger test",
+      content: "Content for approve all ledger test",
+      sourceFilePath: "test.md",
+      approveAll: true,
+    });
+
+    const ledger = await approvalStore.readAll();
+    const approveEntry = ledger.find((e) => e.action === "approve");
+    expect(approveEntry).toBeTruthy();
+    expect(approveEntry!.actionSource).toBe("imported");
+  });
+
+  it("sets statusReason with source file name", async () => {
+    const { promoter } = setup();
+
+    const result = await promoter.promoteImport({
+      kind: "domain_rule",
+      title: "Status reason test",
+      content: "Content for status reason test",
+      sourceFilePath: "CLAUDE.md",
+      approveAll: false,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.entry.statusReason).toBe("Imported from CLAUDE.md");
+    }
+  });
+});
+
 describe("Promoter.reject", () => {
   const createPending = async (sharedStore: FileSharedStore) => {
     const entry: SharedKnowledgeEntry = {

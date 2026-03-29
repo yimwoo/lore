@@ -1,4 +1,4 @@
-import type { ObservationEntry, SharedKnowledgeKind, MemoryKind } from "../shared/types";
+import type { ObservationEntry, SharedKnowledgeKind, MemoryKind, SignalStrength } from "../shared/types";
 import { isSharedKnowledgeKind } from "../shared/types";
 import type { PromotionCriteria } from "../config";
 import type { SharedKnowledgeStore } from "../core/shared-store";
@@ -22,6 +22,13 @@ type AggregatedObservation = {
   sessionIds: Set<string>;
   projectIds: Set<string>;
   lastSeenAt: string;
+  maxSignalStrength?: SignalStrength;
+};
+
+const SIGNAL_STRENGTH_ORDER: Record<SignalStrength, number> = {
+  strong: 2,
+  medium: 1,
+  weak: 0,
 };
 
 const memoryKindToSharedKind: Partial<Record<MemoryKind, SharedKnowledgeKind>> = {
@@ -68,7 +75,9 @@ export class SuggestionEngine {
 
       // Check thresholds
       if (agg.maxConfidence < criteria.minConfidence) continue;
-      if (agg.sessionIds.size < criteria.minSessionCount) continue;
+      const maxSignalStrength: SignalStrength = agg.maxSignalStrength ?? "weak";
+      const effectiveMinSessionCount = maxSignalStrength === "strong" ? 1 : criteria.minSessionCount;
+      if (agg.sessionIds.size < effectiveMinSessionCount) continue;
       if (agg.projectIds.size < criteria.minProjectCount) continue;
 
       // Check if already in shared store
@@ -121,6 +130,11 @@ export class SuggestionEngine {
         if (obs.timestamp > existing.lastSeenAt) {
           existing.lastSeenAt = obs.timestamp;
         }
+        const obsStrength: SignalStrength = obs.signalStrength ?? "weak";
+        const existingStrength: SignalStrength = existing.maxSignalStrength ?? "weak";
+        if (SIGNAL_STRENGTH_ORDER[obsStrength] > SIGNAL_STRENGTH_ORDER[existingStrength]) {
+          existing.maxSignalStrength = obsStrength;
+        }
       } else {
         map.set(key, {
           contentHash: obs.contentHash,
@@ -129,6 +143,7 @@ export class SuggestionEngine {
           sessionIds: new Set([obs.sessionId]),
           projectIds: new Set([obs.projectId]),
           lastSeenAt: obs.timestamp,
+          maxSignalStrength: obs.signalStrength,
         });
       }
     }

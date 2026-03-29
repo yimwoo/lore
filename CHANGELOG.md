@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.5.0] - 2026-03-29
+
+### Added
+
+- **`lore import <file>`** — Bulk import from convention files (`.cursorrules`, `CLAUDE.md`, `.clinerules`, `.windsurfrules`, `AGENTS.md`, `CONVENTIONS.md`). Includes `--dry-run`, `--approve-all`, `--kind`, `--tag-prefix` options. Parses markdown headings and bullets into individual entries with heuristic kind assignment.
+- **`lore init`** — Interactive onboarding that scans the project for 9 convention file formats, offers to import each one, and creates the `~/.lore/` directory structure. Supports `--yes` for scripted setup.
+- **`lore dashboard`** — Structured knowledge base overview showing entry counts by kind/status, tag coverage with strength labels, recent activity, and health indicators (stale entries, contradictions). Also available as MCP `lore.dashboard` tool.
+- **Signal strength classifier** — Pure regex-based classifier that grades extraction candidates as strong/medium/weak based on user prompt tone. Strong signals (imperatives like "always", "never", "must"; corrections; convention declarations) get 0.9 confidence floor and skip the `minSessionCount` threshold. New `signalStrength` field on `DraftCandidate` and `ObservationEntry`.
+- New `--tag`, `--stale`, `--contradictions` filter flags for `lore list-shared`.
+- New `staleDaysThreshold` configuration option (default: 60 days).
+- New pure modules: `src/core/markdown-parser.ts`, `src/extraction/signal-classifier.ts`, `src/core/dashboard-aggregator.ts`.
+- 100+ new tests across 4 new test files.
+
 ## [1.4.1] - 2026-03-29
 
 ### Added

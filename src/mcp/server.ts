@@ -1,4 +1,5 @@
 import type {
+  DashboardData,
   SharedKnowledgeEntry,
   SharedKnowledgeFilter,
   SharedKnowledgeKind,
@@ -6,6 +7,8 @@ import type {
 import { isSharedKnowledgeKind } from "../shared/types";
 import { validateFilterInput } from "../shared/validators";
 import type { SharedKnowledgeStore } from "../core/shared-store";
+import { aggregateDashboard } from "../core/dashboard-aggregator";
+import type { FileApprovalStore } from "../promotion/approval-store";
 
 export type ToolDefinition = {
   name: string;
@@ -143,6 +146,16 @@ export const toolDefinitions: ToolDefinition[] = [
       required: ["query"],
     },
   },
+  {
+    name: "lore.dashboard",
+    description:
+      "Show a structured overview of the Lore shared knowledge base including entry counts by kind and status, tag coverage, recent activity, and health indicators.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
 ];
 
 type ToolArgs = Record<string, unknown>;
@@ -273,4 +286,23 @@ export const handleToolCall = async (
     default:
       throw new Error(`Unknown tool: ${toolName}`);
   }
+};
+
+export const handleDashboardToolCall = async (
+  store: SharedKnowledgeStore,
+  approvalStore: FileApprovalStore,
+  config: { staleDaysThreshold: number },
+): Promise<DashboardData> => {
+  const approvedEntries = await store.list({ approvalStatus: "approved" });
+  const pendingEntries = await store.list({ approvalStatus: "pending" });
+  const rejectedEntries = await store.list({ approvalStatus: "rejected" });
+  const demotedEntries = await store.list({ approvalStatus: "demoted" });
+  const entries = [...approvedEntries, ...pendingEntries, ...rejectedEntries, ...demotedEntries];
+
+  const ledgerEntries = await approvalStore.readAll();
+
+  return aggregateDashboard(entries, ledgerEntries, {
+    staleDaysThreshold: config.staleDaysThreshold,
+    now: new Date().toISOString(),
+  });
 };

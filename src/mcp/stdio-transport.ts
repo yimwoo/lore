@@ -1,8 +1,9 @@
 import { createInterface } from "node:readline";
 
 import { FileSharedStore } from "../core/file-shared-store";
+import { FileApprovalStore } from "../promotion/approval-store";
 import { resolveConfig } from "../config";
-import { handleToolCall, toolDefinitions } from "./server";
+import { handleDashboardToolCall, handleToolCall, toolDefinitions } from "./server";
 import {
   createRunId,
   debugLoggingEnabled,
@@ -43,9 +44,15 @@ const makeError = (
   error: { code, message },
 });
 
+type TransportDeps = {
+  store: FileSharedStore;
+  approvalStore: FileApprovalStore;
+  staleDaysThreshold: number;
+};
+
 const handleRequest = async (
   request: JsonRpcRequest,
-  store: FileSharedStore,
+  deps: TransportDeps,
   runId?: string,
 ): Promise<JsonRpcResponse> => {
   const log = (
@@ -121,7 +128,18 @@ const handleRequest = async (
       }, {
         ok: true,
       });
-      const result = await handleToolCall(toolName, args, store);
+
+      let result: unknown;
+      if (toolName === "lore.dashboard") {
+        result = await handleDashboardToolCall(
+          deps.store,
+          deps.approvalStore,
+          { staleDaysThreshold: deps.staleDaysThreshold },
+        );
+      } else {
+        result = await handleToolCall(toolName, args, deps.store);
+      }
+
       const response = makeResponse(request.id, {
         content: [{ type: "text", text: JSON.stringify(result) }],
       });
@@ -181,6 +199,15 @@ export const runStdioTransport = async (
   const store = new FileSharedStore({
     storagePath: config.sharedStoragePath,
   });
+  const approvalStore = new FileApprovalStore({
+    ledgerPath: config.approvalLedgerPath,
+    sharedStore: store,
+  });
+  const deps: TransportDeps = {
+    store,
+    approvalStore,
+    staleDaysThreshold: config.staleDaysThreshold,
+  };
   const runId = debugLoggingEnabled ? createRunId() : undefined;
 
   const reader = createInterface({
@@ -212,7 +239,7 @@ export const runStdioTransport = async (
       continue;
     }
 
-    const response = await handleRequest(request, store, runId);
+    const response = await handleRequest(request, deps, runId);
     process.stdout.write(JSON.stringify(response) + "\n");
   }
 };

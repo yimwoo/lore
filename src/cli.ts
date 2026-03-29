@@ -1,15 +1,20 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 
 import { createLoreApp } from "./app";
 import { parseRawSessionEvent } from "./bridge/events";
+import { aggregateDashboard, renderDashboardText } from "./core/dashboard-aggregator";
 import { FileMemoryStore } from "./core/memory-store";
 import { FileSharedStore } from "./core/file-shared-store";
 import { FileApprovalStore } from "./promotion/approval-store";
 import { Promoter } from "./promotion/promoter";
+import type { PromoteImportResult } from "./promotion/promoter";
+import { parseMarkdownEntries } from "./core/markdown-parser";
+import type { ImportCandidate } from "./core/markdown-parser";
+import { runInit } from "./cli/init";
 import { ObservationLogReader } from "./promotion/observation-log";
 import { contentHash } from "./shared/validators";
 import { resolveConfig } from "./config";
@@ -23,7 +28,7 @@ import {
   type DebugLogLevel,
 } from "./shared/debug-log";
 
-type CliStreams = {
+export type CliStreams = {
   stdin: Readable;
   stdout: Writable;
   stderr: Writable;
@@ -44,7 +49,10 @@ Commands:
   demote <id>                    Soft-delete a shared knowledge entry
   approve <id>                   Approve a pending suggestion
   reject <id>                    Reject a pending suggestion
+  import <file>                  Import knowledge from a convention file
+  init                             Interactive onboarding — scan and import convention files
   suggest                        Show observation/debug info for the retired suggestion path
+  dashboard                      Show knowledge base overview and health
   help                           Show this help message
 
 Options:
@@ -57,7 +65,15 @@ Options:
   --tags <tags>                  Comma-separated tags
   --status <status>              Filter by approval status
   --reason <reason>              Reason for demote
+  --approve-all                  Approve all imported entries immediately
+  --tag-prefix <prefix>          Add a tag prefix to all imported entries
+  --dry-run                      Show what would be imported without writing
+  --yes                            Import all found files without prompting
+  --project-dir <path>             Project directory to scan (default: cwd)
   --json                         Print JSON output
+  --tag <tag>                    Filter by tag
+  --stale                        Show entries not seen in 60+ days
+  --contradictions               Show entries with contradictions flagged
 `;
 
 type ParsedArgs = {
@@ -348,7 +364,7 @@ const runListShared = async (
   options: Record<string, string | boolean>,
   streams: CliStreams,
 ) => {
-  const { sharedStore } = createPromoter(options);
+  const { sharedStore, config } = createPromoter(options);
 
   const kind =
     typeof options.kind === "string" && isSharedKnowledgeKind(options.kind)
@@ -360,10 +376,29 @@ const runListShared = async (
       ? (options.status as SharedKnowledgeEntry["approvalStatus"])
       : undefined;
 
-  const entries = await sharedStore.list({
+  let entries = await sharedStore.list({
     kind,
     approvalStatus: status,
   });
+
+  if (typeof options.tag === "string") {
+    const tagValue = options.tag;
+    entries = entries.filter((e) => e.tags.includes(tagValue));
+  }
+
+  if (options.stale === true) {
+    const threshold = config.staleDaysThreshold;
+    const now = Date.now();
+    entries = entries.filter((e) => {
+      const diffMs = now - new Date(e.lastSeenAt).getTime();
+      const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+      return diffDays >= threshold;
+    });
+  }
+
+  if (options.contradictions === true) {
+    entries = entries.filter((e) => (e.contradictionCount ?? 0) > 0);
+  }
 
   const output =
     options.json === true
@@ -499,6 +534,172 @@ const runSuggest = async (
           observations: observations.length,
         })
       : `SuggestionEngine is retired. Pending entries are now created by SessionStart consolidation. Observation log currently has ${observations.length} entr${observations.length === 1 ? "y" : "ies"}.`;
+  await writeOutput(streams.stdout, output);
+};
+
+type ImportResult = {
+  candidate: ImportCandidate;
+  outcome: PromoteImportResult;
+};
+
+const importCandidates = async (
+  promoter: Promoter,
+  candidates: ImportCandidate[],
+  sourceFilePath: string,
+  approveAll: boolean,
+): Promise<ImportResult[]> => {
+  const results: ImportResult[] = [];
+
+  for (const candidate of candidates) {
+    const outcome = await promoter.promoteImport({
+      kind: candidate.inferredKind,
+      title: candidate.title,
+      content: candidate.content,
+      tags: candidate.tags,
+      sourceFilePath: basename(sourceFilePath),
+      approveAll,
+    });
+
+    results.push({ candidate, outcome });
+  }
+
+  return results;
+};
+
+const renderImportSummary = (
+  results: ImportResult[],
+  filePath: string,
+  approveAll: boolean,
+): string => {
+  const created = results.filter((r) => r.outcome.ok && r.outcome.action === "created");
+  const skipped = results.filter((r) => r.outcome.ok && r.outcome.action === "skipped");
+  const failed = results.filter((r) => !r.outcome.ok);
+
+  const kindCounts: Record<string, number> = {};
+  for (const r of created) {
+    if (r.outcome.ok) {
+      const k = r.outcome.entry.kind;
+      kindCounts[k] = (kindCounts[k] ?? 0) + 1;
+    }
+  }
+
+  const kindBreakdown = Object.entries(kindCounts)
+    .map(([k, n]) => `${n} ${k.replace(/_/g, " ")}${n === 1 ? "" : "s"}`)
+    .join(", ");
+
+  const status = approveAll ? "approved" : "pending";
+  const lines = [
+    `Imported ${created.length} entries from ${basename(filePath)} (${kindBreakdown}).`,
+    `Status: ${status}.`,
+  ];
+
+  if (skipped.length > 0) {
+    lines.push(`Skipped ${skipped.length} duplicate${skipped.length === 1 ? "" : "s"}.`);
+  }
+  if (failed.length > 0) {
+    lines.push(`Failed: ${failed.length} entr${failed.length === 1 ? "y" : "ies"} (validation errors).`);
+    for (const f of failed) {
+      if (!f.outcome.ok) {
+        lines.push(`  - "${f.candidate.title}": ${f.outcome.reason}`);
+      }
+    }
+  }
+
+  if (!approveAll && created.length > 0) {
+    lines.push(`Review with: lore list-shared --status pending`);
+  }
+
+  return lines.join("\n");
+};
+
+const renderDryRunOutput = (
+  candidates: ImportCandidate[],
+  filePath: string,
+): string => {
+  const lines = [
+    `Dry run: ${candidates.length} entries would be imported from ${basename(filePath)}`,
+    "",
+  ];
+
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i]!;
+    const preview = c.content.length > 80
+      ? `${c.content.slice(0, 77)}...`
+      : c.content;
+    lines.push(`${i + 1}. [${c.inferredKind}] ${c.title}`);
+    lines.push(`   ${preview}`);
+    if (c.tags.length > 0) {
+      lines.push(`   tags: ${c.tags.join(", ")}`);
+    }
+  }
+
+  return lines.join("\n");
+};
+
+const runImport = async (
+  options: Record<string, string | boolean>,
+  streams: CliStreams,
+  filePath: string,
+): Promise<void> => {
+  const absolutePath = resolve(filePath);
+  const raw = await readFile(absolutePath, "utf8");
+
+  const kindOverride =
+    typeof options.kind === "string" && isSharedKnowledgeKind(options.kind)
+      ? (options.kind as SharedKnowledgeKind)
+      : undefined;
+  const tagPrefix =
+    typeof options["tag-prefix"] === "string" ? options["tag-prefix"] : undefined;
+
+  const candidates = parseMarkdownEntries(raw, { kindOverride, tagPrefix });
+
+  if (candidates.length === 0) {
+    await writeOutput(streams.stdout, "No importable entries found in file.");
+    return;
+  }
+
+  const approveAll = options["approve-all"] === true;
+  const dryRun = options["dry-run"] === true;
+
+  if (dryRun) {
+    await writeOutput(streams.stdout, renderDryRunOutput(candidates, absolutePath));
+    return;
+  }
+
+  const { promoter } = createPromoter(options);
+  const results = await importCandidates(
+    promoter,
+    candidates,
+    absolutePath,
+    approveAll,
+  );
+
+  await writeOutput(streams.stdout, renderImportSummary(results, absolutePath, approveAll));
+};
+
+const runDashboard = async (
+  options: Record<string, string | boolean>,
+  streams: CliStreams,
+): Promise<void> => {
+  const { sharedStore, approvalStore, config } = createPromoter(options);
+
+  const approvedEntries = await sharedStore.list({ approvalStatus: "approved" });
+  const pendingEntries = await sharedStore.list({ approvalStatus: "pending" });
+  const rejectedEntries = await sharedStore.list({ approvalStatus: "rejected" });
+  const demotedEntries = await sharedStore.list({ approvalStatus: "demoted" });
+  const entries = [...approvedEntries, ...pendingEntries, ...rejectedEntries, ...demotedEntries];
+
+  const ledgerEntries = await approvalStore.readAll();
+
+  const data = aggregateDashboard(entries, ledgerEntries, {
+    staleDaysThreshold: config.staleDaysThreshold,
+    now: new Date().toISOString(),
+  });
+
+  const output = options.json === true
+    ? JSON.stringify(data, null, 2)
+    : renderDashboardText(data);
+
   await writeOutput(streams.stdout, output);
 };
 
@@ -641,8 +842,38 @@ export const runCli = async (
         });
         return 0;
       }
+      case "import": {
+        const importPath = parsed.positional[0];
+        if (!importPath) throw new Error("Missing file path for import command.");
+        await runImport(parsed.options, streams, importPath);
+        log("info", "cli.command_succeeded", {
+          command: parsed.command,
+        }, {
+          ok: true,
+          summary: "Lore CLI command completed successfully.",
+        });
+        return 0;
+      }
+      case "init":
+        await runInit(parsed.options, streams);
+        log("info", "cli.command_succeeded", {
+          command: parsed.command,
+        }, {
+          ok: true,
+          summary: "Lore CLI command completed successfully.",
+        });
+        return 0;
       case "suggest":
         await runSuggest(parsed.options, streams);
+        log("info", "cli.command_succeeded", {
+          command: parsed.command,
+        }, {
+          ok: true,
+          summary: "Lore CLI command completed successfully.",
+        });
+        return 0;
+      case "dashboard":
+        await runDashboard(parsed.options, streams);
         log("info", "cli.command_succeeded", {
           command: parsed.command,
         }, {

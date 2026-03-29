@@ -13,6 +13,7 @@ import {
   dlog,
   type DebugLogLevel,
 } from "../shared/debug-log";
+import { classifySignal, adjustConfidence } from "./signal-classifier";
 
 type CodexProviderConfig = {
   apiKey?: string;
@@ -342,7 +343,24 @@ export class CodexExtractionProvider implements ExtractionProvider {
       }, {
         ok: true,
       });
-      return parsed.candidates;
+      const classification = turn.userPrompt
+        ? classifySignal(turn.userPrompt)
+        : { signalStrength: "weak" as const, strongMatchCount: 0, mediumMatchCount: 0, weakDampenerCount: 0 };
+      const classifiedCandidates = parsed.candidates.map((candidate) => ({
+        ...candidate,
+        signalStrength: classification.signalStrength,
+        confidence: adjustConfidence(candidate.confidence, classification.signalStrength),
+      }));
+      log("debug", "extraction.signal_classified", {
+        signalStrength: classification.signalStrength,
+        strongMatchCount: classification.strongMatchCount,
+        mediumMatchCount: classification.mediumMatchCount,
+        weakDampenerCount: classification.weakDampenerCount,
+        candidateCount: classifiedCandidates.length,
+      }, {
+        ok: true,
+      });
+      return classifiedCandidates;
     } catch (error) {
       log("warn", "extraction.llm_response_received", {
         error: error instanceof Error ? error.message : String(error),

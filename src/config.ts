@@ -42,6 +42,7 @@ export type LoreConfig = {
   sessionStart: SessionStartConfig;
   whisper: WhisperConfig;
   promotionPolicy: Record<SharedKnowledgeKind, PromotionCriteria>;
+  staleDaysThreshold: number;
 };
 
 const DEFAULT_BASE_DIR = join(homedir(), ".lore");
@@ -155,5 +156,6 @@ export const resolveConfig = (
     sessionStart: overrides?.sessionStart ?? { ...defaultSessionStartConfig },
     whisper: overrides?.whisper ?? { ...defaultWhisperConfig },
     promotionPolicy: overrides?.promotionPolicy ?? defaultPromotionPolicy,
+    staleDaysThreshold: overrides?.staleDaysThreshold ?? 60,
   };
 };

@@ -308,3 +308,69 @@ describe("CodexExtractionProvider auth warnings", () => {
     expect(lines.some((line) => line.data?.reason === "missing_api_key")).toBe(true);
   });
 });
+
+const makeProviderWithMockFetch = (
+  outputText: string,
+): CodexExtractionProvider =>
+  new CodexExtractionProvider({
+    readFile: async (path: string): Promise<string> => {
+      if (path.endsWith("/.codex/auth.json")) {
+        return JSON.stringify({ OPENAI_API_KEY: "sk-test" });
+      }
+      if (path.endsWith("/.codex/config.toml")) {
+        return 'base_url = "https://api.example.com/v1"\nmodel = "gpt-5.4"\n';
+      }
+      throw new Error("missing");
+    },
+    writeFile: async (): Promise<void> => undefined,
+    mkdir: async (): Promise<string | undefined> => undefined,
+    fetch: async (): Promise<Response> =>
+      new Response(
+        JSON.stringify({ output_text: outputText }),
+        { status: 200 },
+      ),
+    now: () => "2026-03-28T21:00:00.000Z",
+    warn: (): void => undefined,
+  });
+
+describe("CodexExtractionProvider signal classification", () => {
+  it("extractCandidates attaches signalStrength and adjusts confidence", async () => {
+    const candidateJson = JSON.stringify([{
+      kind: "domain_rule",
+      title: "Use snake_case for DB columns",
+      content: "All database columns use snake_case naming.",
+      confidence: 0.6,
+    }]);
+    const provider = makeProviderWithMockFetch(candidateJson);
+    const turn: TurnArtifact = {
+      ...makeTurnArtifact(),
+      userPrompt: "we always use snake_case for DB columns",
+    };
+
+    const result = await provider.extractCandidates(turn);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]!.signalStrength).toBe("strong");
+    expect(result[0]!.confidence).toBe(0.9);
+  });
+
+  it("extractCandidates with no userPrompt defaults to weak", async () => {
+    const candidateJson = JSON.stringify([{
+      kind: "domain_rule",
+      title: "Use snake_case for DB columns",
+      content: "All database columns use snake_case naming.",
+      confidence: 0.6,
+    }]);
+    const provider = makeProviderWithMockFetch(candidateJson);
+    const turn: TurnArtifact = {
+      ...makeTurnArtifact(),
+      userPrompt: undefined,
+    };
+
+    const result = await provider.extractCandidates(turn);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]!.signalStrength).toBe("weak");
+    expect(result[0]!.confidence).toBe(0.6);
+  });
+});

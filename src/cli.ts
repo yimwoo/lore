@@ -14,6 +14,7 @@ import { Promoter } from "./promotion/promoter";
 import type { PromoteImportResult } from "./promotion/promoter";
 import { parseMarkdownEntries } from "./core/markdown-parser";
 import type { ImportCandidate } from "./core/markdown-parser";
+import { runInit } from "./cli/init";
 import { ObservationLogReader } from "./promotion/observation-log";
 import { contentHash } from "./shared/validators";
 import { resolveConfig } from "./config";
@@ -27,7 +28,7 @@ import {
   type DebugLogLevel,
 } from "./shared/debug-log";
 
-type CliStreams = {
+export type CliStreams = {
   stdin: Readable;
   stdout: Writable;
   stderr: Writable;
@@ -49,6 +50,7 @@ Commands:
   approve <id>                   Approve a pending suggestion
   reject <id>                    Reject a pending suggestion
   import <file>                  Import knowledge from a convention file
+  init                             Interactive onboarding — scan and import convention files
   suggest                        Show observation/debug info for the retired suggestion path
   dashboard                      Show knowledge base overview and health
   help                           Show this help message
@@ -66,6 +68,8 @@ Options:
   --approve-all                  Approve all imported entries immediately
   --tag-prefix <prefix>          Add a tag prefix to all imported entries
   --dry-run                      Show what would be imported without writing
+  --yes                            Import all found files without prompting
+  --project-dir <path>             Project directory to scan (default: cwd)
   --json                         Print JSON output
   --tag <tag>                    Filter by tag
   --stale                        Show entries not seen in 60+ days
@@ -850,6 +854,15 @@ export const runCli = async (
         });
         return 0;
       }
+      case "init":
+        await runInit(parsed.options, streams);
+        log("info", "cli.command_succeeded", {
+          command: parsed.command,
+        }, {
+          ok: true,
+          summary: "Lore CLI command completed successfully.",
+        });
+        return 0;
       case "suggest":
         await runSuggest(parsed.options, streams);
         log("info", "cli.command_succeeded", {

@@ -8,6 +8,7 @@ import { FileApprovalStore } from "../src/promotion/approval-store";
 import { Promoter } from "../src/promotion/promoter";
 import { resolveConfig } from "../src/config";
 import { contentHash } from "../src/shared/validators";
+import { computeNormalizedHash } from "../src/shared/semantic-normalizer";
 import type { SharedKnowledgeEntry } from "../src/shared/types";
 
 let testDir: string;
@@ -697,5 +698,107 @@ describe("Promoter.reject", () => {
       .map((line) => JSON.parse(line) as { event: string });
     expect(lines.some((line) => line.event === "promotion.promote_requested")).toBe(true);
     expect(lines.some((line) => line.event === "promotion.promote_created")).toBe(true);
+  });
+});
+
+describe("normalizedHash dedup", () => {
+  it("stores normalizedHash on create via promoteExplicit", async () => {
+    const { promoter, sharedStore } = setup();
+    const content = "All DB columns must use snake_case";
+
+    const result = await promoter.promoteExplicit({
+      kind: "domain_rule",
+      title: "Use snake_case",
+      content,
+      tags: ["naming"],
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.entry.normalizedHash).toBe(computeNormalizedHash(content));
+    }
+
+    const entries = await sharedStore.list();
+    expect(entries[0]!.normalizedHash).toBe(computeNormalizedHash(content));
+  });
+
+  it("stores normalizedHash on create via promoteImport", async () => {
+    const { promoter } = setup();
+    const content = "All DB columns must use snake_case naming convention";
+
+    const result = await promoter.promoteImport({
+      kind: "domain_rule",
+      title: "Use snake_case",
+      content,
+      sourceFilePath: "CLAUDE.md",
+      approveAll: false,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.entry.normalizedHash).toBe(computeNormalizedHash(content));
+    }
+  });
+
+  it("deduplicates via normalizedHash in promoteExplicit", async () => {
+    const { promoter, sharedStore } = setup();
+
+    // Create an approved entry with content
+    const firstResult = await promoter.promoteExplicit({
+      kind: "domain_rule",
+      title: "Rule A",
+      content: "Always use snake_case for columns",
+      tags: ["naming"],
+      sourceProjectId: "proj-1",
+    });
+    expect(firstResult.ok).toBe(true);
+
+    // Promote with semantically equivalent content (different imperative verb)
+    const secondResult = await promoter.promoteExplicit({
+      kind: "domain_rule",
+      title: "Rule A duplicate",
+      content: "Must use snake_case for columns",
+      tags: ["naming-2"],
+      sourceProjectId: "proj-2",
+    });
+
+    expect(secondResult.ok).toBe(true);
+    if (secondResult.ok) {
+      expect(secondResult.action).toBe("merged");
+      // Should match the existing entry
+      expect(secondResult.entry.id).toBe(
+        firstResult.ok ? firstResult.entry.id : "",
+      );
+    }
+
+    const entries = await sharedStore.list();
+    expect(entries).toHaveLength(1);
+  });
+
+  it("deduplicates via normalizedHash in promoteImport", async () => {
+    const { promoter } = setup();
+
+    // Create an approved entry
+    await promoter.promoteImport({
+      kind: "domain_rule",
+      title: "Rule A",
+      content: "Always use snake_case for columns",
+      sourceFilePath: "file.md",
+      approveAll: true,
+    });
+
+    // Import with semantically equivalent content
+    const result = await promoter.promoteImport({
+      kind: "domain_rule",
+      title: "Rule A duplicate",
+      content: "Must use snake_case for columns",
+      sourceFilePath: "file.md",
+      approveAll: false,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.action).toBe("skipped");
+    }
   });
 });

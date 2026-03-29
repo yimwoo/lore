@@ -16,6 +16,11 @@ export type ConsolidationInput = {
   drafts: DraftCandidate[];
   observations: ConsolidationObservation[];
   existingPendingEntries: SharedKnowledgeEntry[];
+  candidatePairs?: Array<{
+    draftId: string;
+    existingEntryId: string;
+    similarity: number;
+  }>;
 };
 
 export type ConsolidatedEntry = {

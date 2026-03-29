@@ -9,6 +9,7 @@ import {
   contentHash,
   validatePromotionInput,
 } from "../shared/validators";
+import { computeNormalizedHash } from "../shared/semantic-normalizer";
 import { checkForbidPatterns, validateStateTransition } from "./policy";
 import {
   createRunId,
@@ -171,8 +172,8 @@ export class Promoter {
       return { ok: false, reason: titleForbidCheck.reason };
     }
 
-    // 4. Check for existing entry with same contentHash + kind
-    const existing = await this.findExisting(hash, input.kind);
+    // 4. Check for existing entry with same contentHash or normalizedHash + kind
+    const existing = await this.findExisting(hash, input.kind, computeNormalizedHash(input.content));
 
     if (existing) {
       if (
@@ -260,8 +261,8 @@ export class Promoter {
       return { ok: false, reason: titleForbidCheck.reason };
     }
 
-    // 3. Check for existing entry with same content hash
-    const existing = await this.findExisting(hash, input.kind);
+    // 3. Check for existing entry with same content hash or normalized hash
+    const existing = await this.findExisting(hash, input.kind, computeNormalizedHash(input.content));
     if (existing) {
       if (existing.approvalStatus === "approved" || existing.approvalStatus === "pending") {
         return { ok: true, entry: existing, action: "skipped" };
@@ -293,6 +294,7 @@ export class Promoter {
       projectCount: 0,
       lastSeenAt: timestamp,
       contentHash: hash,
+      normalizedHash: computeNormalizedHash(input.content),
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -507,6 +509,7 @@ export class Promoter {
   private async findExisting(
     hash: string,
     kind: SharedKnowledgeKind,
+    normalizedHash?: string,
   ): Promise<SharedKnowledgeEntry | null> {
     const entries = await this.sharedStore.list({
       kind,
@@ -515,6 +518,13 @@ export class Promoter {
     const match = entries.find((e) => e.contentHash === hash);
     if (match) return match;
 
+    if (normalizedHash) {
+      const normalizedMatch = entries.find(
+        (e) => e.normalizedHash === normalizedHash,
+      );
+      if (normalizedMatch) return normalizedMatch;
+    }
+
     // Also check pending
     const pending = await this.sharedStore.list({
       kind,
@@ -522,6 +532,13 @@ export class Promoter {
     });
     const pendingMatch = pending.find((e) => e.contentHash === hash);
     if (pendingMatch) return pendingMatch;
+
+    if (normalizedHash) {
+      const pendingNormalized = pending.find(
+        (e) => e.normalizedHash === normalizedHash,
+      );
+      if (pendingNormalized) return pendingNormalized;
+    }
 
     return null;
   }
@@ -626,6 +643,7 @@ export class Promoter {
       projectCount: input.sourceProjectId ? 1 : 0,
       lastSeenAt: timestamp,
       contentHash: hash,
+      normalizedHash: computeNormalizedHash(input.content),
       createdAt: timestamp,
       updatedAt: timestamp,
     };

@@ -151,6 +151,7 @@ export type SharedKnowledgeEntry = {
   projectCount: number;
   lastSeenAt: string;
   contentHash: string;
+  normalizedHash?: string;
 
   createdAt: string;
   updatedAt: string;

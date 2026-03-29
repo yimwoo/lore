@@ -16,7 +16,7 @@ Restart Codex, open **Local Plugins**, find **Lore**, and click **Install**.
 
 **That's it. Start coding. Lore starts learning.**
 
-> Want to teach Lore rules directly right now? See [Managing Knowledge](#managing-knowledge-power-users).
+> Already have a `CLAUDE.md`, `.cursorrules`, or `CONVENTIONS.md`? Run `lore init` to import your existing rules in seconds. See [Cold Start](#cold-start-instant-setup).
 
 ---
 
@@ -85,6 +85,28 @@ For a deeper dive, see the [Design Overview](docs/design.md).
 
 ---
 
+## Cold Start — Instant Setup
+
+Already have convention files? Lore can import them immediately:
+
+```bash
+lore init                    # Scan project, import found convention files interactively
+lore init --yes              # Auto-import all found files (scripted setup)
+```
+
+`lore init` scans for `.cursorrules`, `CLAUDE.md`, `.clinerules`, `.windsurfrules`, `AGENTS.md`, `CONVENTIONS.md`, and more. Each file is parsed into individual knowledge entries as `pending` suggestions for your review.
+
+Or import specific files directly:
+
+```bash
+lore import CLAUDE.md                      # Import as pending entries
+lore import .cursorrules --approve-all     # Import and auto-approve
+lore import AGENTS.md --dry-run            # Preview without importing
+lore import CONVENTIONS.md --kind domain_rule --tag-prefix team
+```
+
+---
+
 ## Real-World Examples
 
 **Cross-project recall** — You're in Project B debugging a billing service. Lore whispers that three weeks ago in Project A, you decided Postgres is the source of truth for billing state — not Redis. Without Lore, you'd spend 30 minutes rediscovering that.
@@ -132,16 +154,25 @@ Your agent can proactively search Lore for deeper context:
 | `lore.recall_architecture` | Architecture facts and platform assumptions |
 | `lore.recall_decisions` | Decision records with rationale |
 | `lore.search_knowledge` | Cross-kind freeform search |
+| `lore.dashboard` | Knowledge base overview (counts, tags, health) |
 
 Bundled with the plugin install — no separate MCP configuration needed.
 
 ---
 
-## Managing Knowledge (Power Users)
+## Managing Knowledge
 
-Most users let Lore learn on its own and review pending suggestions when SessionStart flags them. If you want to seed Lore immediately — with your team's standards, onboarding rules, or existing documentation — the CLI gives you direct control.
+Most users start with `lore init` and let Lore learn on its own after that. For direct control, the CLI provides full management:
 
-### Promote a rule
+### Import existing conventions
+
+```bash
+lore init                                   # Scan project + import interactively
+lore import CLAUDE.md                       # Import a specific file
+lore import .cursorrules --approve-all      # Import and auto-approve
+```
+
+### Promote a rule manually
 
 ```bash
 lore promote \
@@ -151,12 +182,25 @@ lore promote \
   --tags "naming,database"
 ```
 
-That entry is now in your shared knowledge store — every future session, across every project.
-
 ### See what Lore knows
 
 ```bash
-lore list-shared
+lore list-shared                            # All entries
+lore list-shared --tag database             # Filter by tag
+lore list-shared --stale                    # Entries not seen in 60+ days
+lore list-shared --contradictions           # Entries with conflicts
+lore dashboard                              # Full knowledge base overview
+```
+
+### Resolve conflicts
+
+When Lore detects contradictory rules, it surfaces them at session start:
+
+```bash
+lore resolve <idA> <idB> --keep <id>        # Keep one, demote other
+lore resolve <idA> <idB> --scope <id> --project api  # Make one project-specific
+lore resolve <idA> <idB> --merge            # Combine into one entry
+lore history <id>                           # Trace supersession chain
 ```
 
 ### Remove outdated knowledge
@@ -226,6 +270,7 @@ All data lives locally on your machine:
 ~/.lore/
   shared.json              Shared knowledge entries
   approval-ledger.json     Append-only audit trail
+  conflicts.json           Detected knowledge conflicts
   observations/            Per-session observation logs
   drafts/                  Per-session extracted draft candidates
   consolidation-state.json SessionStart consolidation watermark
@@ -245,7 +290,7 @@ bash ~/.codex/plugins/lore-source/install.sh
 ## Development
 
 ```bash
-npm test            # 339 tests
+npm test            # 624 tests
 npm run test:watch  # watch mode
 npm run typecheck   # tsc --noEmit
 npm run demo        # simulated session
@@ -255,13 +300,15 @@ npm run demo        # simulated session
 
 ```text
 src/
-  core/               Memory store, hint engine, daemon
+  core/               Memory store, hint engine, daemon, markdown parser, dashboard aggregator
   plugin/             SessionStart, instruction template, whisper, stop observer
-  promotion/          Promote, demote, approve, draft store, consolidator
-  mcp/                MCP recall tool handlers
-  shared/             Types and validators
+  promotion/          Promote, demote, approve, draft store, consolidator, conflict detection
+  extraction/         LLM provider interfaces, signal classifier
+  mcp/                MCP recall tool handlers + dashboard tool
+  shared/             Types, validators, semantic normalizer
+  cli/                Init onboarding flow
   ui/                 React sidecar component (experimental)
-tests/                Vitest coverage for core, plugin, CLI, and promotion flows
+tests/                Vitest coverage — 624 tests across 42 files
 ```
 
 ---

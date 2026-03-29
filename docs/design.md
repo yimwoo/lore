@@ -12,6 +12,7 @@ This document covers how Lore works under the hood — the architecture, memory 
 - [Whisper System](#whisper-system)
 - [MCP Recall Tools](#mcp-recall-tools)
 - [Promotion Workflow](#promotion-workflow)
+- [Conflict Detection and Resolution](#conflict-detection-and-resolution)
 - [Shared Knowledge Kinds](#shared-knowledge-kinds)
 - [Validation](#validation)
 - [Storage](#storage)
@@ -131,8 +132,19 @@ type DraftCandidate = {
   turnIndex: number;
   timestamp: string;
   tags: string[];
+  signalStrength?: "strong" | "medium" | "weak";  // from signal classifier
 };
 ```
+
+### Signal Strength Classification
+
+Before writing draft candidates, the extraction provider classifies the user prompt's tone using a pure regex classifier (`src/extraction/signal-classifier.ts`):
+
+- **Strong signals** — imperatives ("always", "never", "must"), corrections ("wrong", "should be"), convention declarations ("the rule is", "our convention"). Confidence floor: 0.9.
+- **Medium signals** — preferences ("I prefer", "let's use"), tendencies ("we tend to"). Confidence floor: 0.7.
+- **Weak signals** — one-off choices, task-specific instructions, questions. Standard confidence.
+
+Strong-signal drafts skip `minSessionCount` in the suggestion engine — a single "always use snake_case" is enough to create a pending entry. Dampener patterns ("just this once", "maybe", trailing "?") can downgrade signals.
 
 ### Stage 2 — Consolidation (SessionStart, bounded)
 
@@ -143,10 +155,12 @@ The `Consolidator` orchestrates:
 1. **Read drafts** — `DraftStoreReader` loads all `DraftCandidate` records with `timestamp > lastConsolidatedAt` from all `drafts/*.jsonl` files. Malformed JSONL lines are skipped; one bad file does not block global consolidation.
 2. **Aggregate observations** — `ObservationLogReader` loads matching observations to derive `sessionCount`, `projectCount`, and `lastSeenAt` per content hash. These frequency signals provide evidence strength the LLM cannot manufacture.
 3. **Load existing pending** — the consolidator fetches all current pending entries regardless of `promotionSource`, including legacy `"suggested"` entries from the retired suggestion engine path.
-4. **Consolidate** — `ConsolidationProvider.consolidate()` groups draft candidates by semantic identity (`kind` + normalized content), rewrites into polished entries, updates evidence fields, and merges duplicates. The current `CodexConsolidationProvider` uses a deterministic grouping algorithm (grouping by `kind:normalizeContent(content)`); LLM-assisted rewriting is architected and gated pending prompt tuning.
-5. **Reconcile pending** — for each consolidated result, the consolidator saves or updates the corresponding pending entry in the shared store.
-6. **Merge deduplication** — when consolidation identifies that two pending entries represent the same rule, the survivor entry is updated and the consumed entries are hard-deleted from the pending queue via `deletePending()`. Each merge is recorded in the approval ledger: `{ action: "merge", survivorId, consumedIds[], actor: "system" }`.
-7. **Advance watermark** — only after the full pass succeeds, `lastConsolidatedAt` is updated in `~/.lore/consolidation-state.json`. If any step fails, the watermark does not advance and the same draft window is reprocessed next session. Reprocessing is safe because consolidation is idempotent — re-running against the same drafts updates evidence counters on already-merged entries without creating duplicates.
+4. **Semantic dedup pre-step** — before calling the provider, the consolidator runs write-time deduplication using Elasticsearch-style fingerprinting (tokenize, normalize IMPERATIVE/NEGATION/PREFERENCE synonyms, remove stopwords, sort, hash). Near-duplicates (Jaccard >= 0.85) are auto-filtered; candidate duplicates (>= 0.65) are forwarded to the provider as `candidatePairs` for LLM-assisted merging. See `src/shared/semantic-normalizer.ts`.
+5. **Consolidate** — `ConsolidationProvider.consolidate()` groups draft candidates by semantic identity (`kind` + normalized content), rewrites into polished entries, updates evidence fields, and merges duplicates. The current `CodexConsolidationProvider` uses a deterministic grouping algorithm (grouping by `kind:normalizeContent(content)`); LLM-assisted rewriting is architected and gated pending prompt tuning.
+6. **Reconcile pending** — for each consolidated result, the consolidator saves or updates the corresponding pending entry in the shared store.
+7. **Merge deduplication** — when consolidation identifies that two pending entries represent the same rule, the survivor entry is updated and the consumed entries are hard-deleted from the pending queue via `deletePending()`. Each merge is recorded in the approval ledger: `{ action: "merge", survivorId, consumedIds[], actor: "system" }`.
+8. **Conflict detection post-step** — after saving entries, the consolidator runs conflict detection against existing approved entries using a NegEx-adapted polarity detector with a 5-step decision tree. Conflicts are classified as `direct_negation`, `scope_mismatch`, `temporal_supersession`, `specialization`, or `ambiguous`. Detected conflicts (except specialization) are stored in `~/.lore/conflicts.json` and increment `contradictionCount` on affected entries. See `src/promotion/conflict-detector.ts`.
+9. **Advance watermark** — only after the full pass succeeds, `lastConsolidatedAt` is updated in `~/.lore/consolidation-state.json`. If any step fails, the watermark does not advance and the same draft window is reprocessed next session. Reprocessing is safe because consolidation is idempotent — re-running against the same drafts updates evidence counters on already-merged entries without creating duplicates.
 
 ### Consolidation state
 
@@ -167,9 +181,10 @@ Pending entries produced by the consolidator carry three additional fields not p
 | --- | --- | --- |
 | `evidenceSummary` | `string` | One-sentence human-readable description of the evidence pattern |
 | `sourceTurnCount` | `number` | Count of distinct `(sessionId, turnIndex)` pairs contributing evidence |
-| `contradictionCount` | `number` | Count of observations that contradict this entry's claim |
+| `contradictionCount` | `number` | Count of observations/entries that contradict this entry's claim |
+| `normalizedHash` | `string?` | Semantic fingerprint for Tier 2 dedup (tokenize → normalize → sort → hash) |
 
-These fields are preserved after approval for provenance. Contradiction detection is conservative — scoped to entries of the same `kind` with overlapping topic tags to avoid false positives.
+These fields are preserved after approval for provenance. Contradiction detection uses a NegEx-adapted polarity detector scoped to entries of the same `kind` with overlapping subject/scope tokens.
 
 ### Draftable kinds gate
 
@@ -395,6 +410,7 @@ The approval ledger supports five action types:
 | `reject` | User rejects a pending entry | reason |
 | `demote` | User soft-deletes an approved entry | reason |
 | `merge` | Consolidator merges duplicate pending entries | `survivorId`, `consumedIds[]` |
+| `resolve` | User resolves a detected conflict between two entries | `resolution`, `supersededEntryId?`, `reason` |
 
 ### Consolidation-backed pending drafts
 
@@ -419,6 +435,49 @@ Observation-based promotion policy thresholds (used by the consolidator when wei
 | `decision_record` | explicit_only | 0.95 | 3 | 2 |
 
 `decision_record` entries require explicit promotion and are never drafted automatically.
+
+## Conflict Detection and Resolution
+
+Lore detects contradictory knowledge entries and surfaces them for resolution.
+
+### Detection
+
+A pure conflict detector (`src/promotion/conflict-detector.ts`) runs as a post-step in the consolidator after saving new entries. It uses:
+
+1. **NegEx-adapted polarity detection** — identifies whether an entry expresses a positive ("use X", "always X") or negative ("never X", "don't use X") stance
+2. **Subject/scope extraction** — extracts the key topic tokens from entry content
+3. **Token Jaccard similarity** — measures overlap between entry subjects (threshold: 0.3 for potential conflict)
+
+### Five-step decision tree
+
+For each pair of same-kind entries with overlapping subjects:
+
+| Step | Check | Classification |
+| --- | --- | --- |
+| 1 | Same kind? | Skip if different kinds |
+| 2 | Overlapping subjects? | Skip if Jaccard < 0.3 |
+| 3 | Opposite polarity? | `direct_negation` if yes |
+| 4 | Different scope? | `scope_mismatch` or `specialization` |
+| 5 | Large temporal gap? | `temporal_supersession` if > 30 days |
+
+`specialization` conflicts (a general rule + a specific override) are detected but not stored — they are valid.
+
+### Resolution
+
+Conflicts are stored in `~/.lore/conflicts.json` and surfaced at session start as a `[Lore · conflict detected]` block (at most one per session, priority-sorted: direct_negation > temporal > scope > ambiguous).
+
+Four resolution actions via `lore resolve <idA> <idB>`:
+
+| Action | Effect |
+| --- | --- |
+| `--keep <id>` | Keep winner, demote loser with `superseded:user_correction` |
+| `--dismiss` | Mark as not-a-conflict, remove from conflict store |
+| `--scope <id> --project <name>` | Narrow one entry's scope to a specific project |
+| `--merge` | Combine both entries into one, demote the originals |
+
+### Supersession chains
+
+When a conflict is resolved by keeping one entry over another, the loser is linked via `supersededEntryId` in the ledger metadata. `lore history <id>` traces the chain of entries that superseded each other, showing the reason taxonomy: `superseded:user_correction`, `superseded:scope_narrowed`, `superseded:updated`, `superseded:merged`.
 
 ## Shared Knowledge Kinds
 
@@ -457,6 +516,7 @@ All data lives locally on your machine:
   drafts/                  Per-session LLM-extracted draft candidates (JSONL)
   consolidation-state.json SessionStart consolidation watermark
   whisper-sessions/        Per-session whisper state
+  conflicts.json           Detected knowledge conflicts (dedup/negation)
   projects/                Per-project memory files (keyed by sha256(projectId))
 ```
 
@@ -483,6 +543,11 @@ The CLI (`src/cli.ts`) provides all management operations:
 | `lore demote <id>` | Soft-delete an entry (requires `--reason`) |
 | `lore approve <id>` | Approve a pending suggestion |
 | `lore reject <id>` | Reject a pending suggestion (requires `--reason`) |
+| `lore import <file>` | Bulk import from convention files (`.cursorrules`, `CLAUDE.md`, `.clinerules`, `.windsurfrules`, `AGENTS.md`, `CONVENTIONS.md`) |
+| `lore init` | Interactive onboarding — scan project for convention files and import |
+| `lore dashboard` | Structured knowledge base overview with counts, tags, activity, and health |
+| `lore resolve <idA> <idB>` | Resolve a conflict between two entries (`--keep`, `--dismiss`, `--scope`, `--merge`) |
+| `lore history <id>` | Trace the supersession chain for an entry |
 | `lore suggest` | Show observation log debug info (retired as pending-entry producer) |
 | `lore demo` | Run a simulated session with sample events |
 | `lore serve` | Read newline-delimited JSON events from stdin |
@@ -490,7 +555,11 @@ The CLI (`src/cli.ts`) provides all management operations:
 
 All commands support `--json` for machine-readable output and `--shared-dir` to override the storage directory.
 
-The `lore suggest` command no longer creates pending entries. Pending entries are now produced exclusively by the SessionStart consolidation pass. `lore suggest` now shows the current observation log count for debugging.
+`lore list-shared` supports additional filters: `--tag <tag>`, `--stale` (entries not seen in 60+ days), `--contradictions` (entries with detected conflicts).
+
+`lore import` supports: `--dry-run`, `--approve-all`, `--kind <kind>` (override inferred kind), `--tag-prefix <prefix>`.
+
+`lore init` supports: `--yes` (auto-import all found files), `--approve-all`, `--project-dir <path>`.
 
 ## Configuration Reference
 
